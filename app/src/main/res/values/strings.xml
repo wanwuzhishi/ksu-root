@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KSU Root</string>
+    <string name="status_idle">未检查</string>
+    <string name="btn_enable">开启 root</string>
+    <string name="btn_continue">继续上次（已中断）</string>
+    <string name="btn_disable">关闭 root（重启）</string>
+    <string name="btn_check">刷新状态</string>
+    <string name="btn_export">导出日志</string>
+    <string name="btn_copy">复制日志</string>
+    <string name="about_entry">关于</string>
+    <string name="about_title">关于 KSU Root</string>
+    <string name="btn_ok">知道了</string>
+</resources>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.KsuRoot" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:statusBarColor">@color/bg_app</item>
+        <item name="android:navigationBarColor">@color/bg_app</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">@color/bg_app</item>
+        <item name="colorPrimary">@color/accent_green</item>
+        <item name="colorOnPrimary">@color/on_accent</item>
+        <item name="colorSurface">@color/bg_card</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="android:colorBackground">@color/bg_app</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.KsuRoot.Dialog</item>
+    </style>
+
+    <!-- 让弹窗用和主界面卡片同一套表面色，别用 Material3 默认的浅灰 -->
+    <style name="ThemeOverlay.KsuRoot.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="colorSurfaceContainerHigh">@color/bg_card</item>
+        <item name="colorSurface">@color/bg_card</item>
+        <item name="colorSurfaceContainer">@color/bg_card</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="colorOnSurfaceVariant">@color/text_secondary</item>
+        <item name="colorPrimary">@color/accent_green</item>
+    </style>
+
+    <!-- 主操作按钮：绿色填充 -->
+    <style name="BtnPrimary">
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/on_accent</item>
+        <item name="android:background">@drawable/btn_primary</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingLeft">0dp</item>
+        <item name="android:paddingRight">0dp</item>
+    </style>
+
+    <!-- 次要操作按钮：描边 -->
+    <style name="BtnOutline">
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:background">@drawable/btn_outline</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingLeft">0dp</item>
+        <item name="android:paddingRight">0dp</item>
+    </style>
+
+    <!-- 危险操作按钮：红描边 -->
+    <style name="BtnOutlineDanger" parent="BtnOutline">
+        <item name="android:textColor">@color/danger_red</item>
+        <item name="android:background">@drawable/btn_outline_danger</item>
+    </style>
+</resources>

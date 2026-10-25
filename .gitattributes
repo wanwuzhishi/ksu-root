@@ -1,0 +1,14 @@
+# 统一换行为 LF：Android 上的 shell 脚本被转成 CRLF 会报
+# "/system/bin/sh: bad interpreter: No such file or directory"
+* text=auto eol=lf
+
+# 二进制不要碰
+*.png binary
+*.jpg binary
+*.jar binary
+*.apk binary
+pk64560 binary
+ptyrun binary
+
+# Windows 批处理必须是 CRLF
+*.bat text eol=crlf

@@ -1,0 +1,82 @@
+KSU Root — 在 Redmi K90 Max（prague / OS4.0）上的一键临时 root App
+
+Copyright 2026 wanwuzhishi
+
+====================================================================
+一、随本仓库分发的代码与二进制
+====================================================================
+
+1) 漏洞利用载荷  assets/pk64560
+
+   来源：ChaYeWuu/prague-CVE-2026-64560-OS4.0
+         https://github.com/ChaYeWuu/prague-CVE-2026-64560-OS4.0
+   版权：Copyright 2026 ChaYeWuu
+   许可：Apache License, Version 2.0
+
+   说明：二进制原样取自上游 payload/libexploit.so，未做任何修改。
+         本项目的贡献在于把它封装成 Android App、编排执行流程、
+         并提供 pty 与 KernelSU 用户态注入的自动化。
+
+2) pty 辅助程序  assets/ptyrun
+
+   来源：本项目自写，源码见 app/src/main/cpp/ptyrun.c
+   许可：Apache License, Version 2.0
+
+   说明：替代 busybox 的 `script` 命令（上游 adb 流程依赖它分配 pty）。
+         自己实现后去掉了 1.4 MB 的 GPL 二进制，全仓库只剩 Apache-2.0。
+
+3) 其余源码（Kotlin / Shell / Gradle 配置）
+
+   许可：Apache License, Version 2.0，版权归本项目作者所有。
+
+====================================================================
+二、运行期依赖（不随本仓库分发）
+====================================================================
+
+以下组件在运行时由用户设备上已安装的软件提供，本仓库不打包、不再分发：
+
+1) KernelSU 用户态（ksud）与内核模块（kernelsu.ko）
+
+   来源：tiann/KernelSU
+         https://github.com/tiann/KernelSU
+   许可：GNU General Public License v3.0
+
+   获取方式：App 运行时执行 `pm path me.weishu.kernelsu`，
+             从用户已安装的 KernelSU 管理器 APK 中提取
+             lib/arm64/libksud.so 到 /data/local/tmp/ksu-root/ksud。
+             内核模块由 ksud 自身内置的资产加载，本项目不涉及。
+
+2) Shizuku
+
+   来源：RikkaApps/Shizuku
+         https://github.com/RikkaApps/Shizuku
+   许可：Apache License, Version 2.0
+
+   说明：通过 dev.rikka.shizuku:api:12.2.0 依赖调用，不打包其二进制。
+
+====================================================================
+三、上游漏洞与修复
+====================================================================
+
+本工具利用的漏洞为 CVE-2026-64560：
+
+  上游修复 commit  920f893f735e92ba3a1cd9256899a186b161928d
+                   "posix-cpu-timers: Prevent UAF caused by non-leader exec() race"
+  6.6 回移       12a891c773aeb5823d63dbd0cb2ab931d6c21c9b
+
+本仓库不包含该漏洞的原始研究成果，仅复用上述上游项目公开的利用代码。
+
+====================================================================
+四、免责声明
+====================================================================
+
+本软件仅供安全研究与自有设备调试使用。使用者需自行承担：
+
+  - 设备内核 panic、意外重启、数据丢失
+  - 系统稳定性下降（利用链会在内核中留下 dangling timer）
+  - 保修失效
+  - 违反当地法律法规的风险
+
+作者不对任何直接或间接损失负责。请勿在非自有设备上使用。
+
+Apache License 2.0 全文见同目录 LICENSE 文件。
