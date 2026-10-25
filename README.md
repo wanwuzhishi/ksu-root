@@ -59,6 +59,7 @@
    - 从 [RikkaApps/Shizuku](https://github.com/RikkaApps/Shizuku/releases) 下载官方版（**不要用各种"优化版""内置 adb 版"，实测有假包**）
    - 用 adb 或无线调试启动服务
    - 授权本 App
+   - **Shevery 也支持**：[HmnDev-Tech/shevery](https://github.com/HmnDev-Tech/shevery) 是 Shizuku 的 fork，保留了同名 binder service 与 `moe.shizuku.manager.permission.API_V23` 权限，只换了包名（`com.hamondev.shevery`）。本 App 已适配它的包名。注意**两者只能装一个**，装 Shevery 前必须先卸载官方 Shizuku
 
 2. **KernelSU 管理器已安装**
    - 从 [tiann/KernelSU](https://github.com/tiann/KernelSU/releases) 下载

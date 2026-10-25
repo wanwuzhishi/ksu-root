@@ -9,13 +9,23 @@ import java.util.concurrent.TimeUnit
 object ShizukuHelper {
 
     const val PERM_REQUEST = 1001
-    private const val SHIZUKU_PKG = "moe.shizuku.privileged.api"
 
-    fun isShizukuInstalled(ctx: Context): Boolean = try {
-        ctx.packageManager.getPackageInfo(SHIZUKU_PKG, 0)
-        true
-    } catch (e: Throwable) {
-        false
+    /**
+     * 已知的 Shizuku 兼容管理器。Shevery 是 Shizuku 的 fork，保留了同名 binder service
+     * 与 `moe.shizuku.manager.permission.API_V23` 权限，只换了 App 包名。两者只能装一个。
+     */
+    private val SHIZUKU_PKGS = listOf(
+        "moe.shizuku.privileged.api",   // 官方
+        "com.hamondev.shevery",         // Shevery
+    )
+
+    fun isShizukuInstalled(ctx: Context): Boolean = SHIZUKU_PKGS.any { pkg ->
+        try {
+            ctx.packageManager.getPackageInfo(pkg, 0)
+            true
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     fun isBinderAlive(): Boolean = try {
