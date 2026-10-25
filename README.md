@@ -3,7 +3,9 @@
 > 在 Redmi K90 Max（代号 `prague`，OS4.0.0.14）上，从手机端一键开一个**临时 root**。
 > 不需要电脑，不需要刷机，不需要解锁 Bootloader。重启即失效。
 
-**下载**：[最新 APK](https://github.com/wanwuzhishi/ksu-root/releases/latest) · 当前版本 v1.0.2
+**下载**：[最新 APK](https://github.com/wanwuzhishi/ksu-root/releases/latest) · 当前版本 v1.0.3
+
+**项目介绍**：[KSU Root：给 Redmi K90 Max 开一个重启就消失的临时 root](https://blog.126330.xyz/posts/3c91e7a2/)——作者博客，把下面这些讲一遍，适合先看这个再看细节。
 
 <p align="center">
   <img src="docs/screenshots/main.png" width="30%" alt="主界面" />
