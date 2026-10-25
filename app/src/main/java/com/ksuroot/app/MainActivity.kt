@@ -94,12 +94,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 断点续跑：上次跑到一半设备重启 / 进程被杀，这里把按钮换成「继续上次」 */
+    /** onResume 会反复触发，用它避免同一次中断被提示多遍 */
+    private var pendingNotified = false
+
     private fun checkPending() {
         if (running) return
-        when (RootController.pending(this)) {
-            RootController.Pending.NONE -> {
-                btnEnable.text = getString(R.string.btn_enable)
-            }
+        val p = RootController.pending(this)
+        if (p == RootController.Pending.NONE) {
+            pendingNotified = false
+            btnEnable.text = getString(R.string.btn_enable)
+            return
+        }
+        // 按钮文案每次都刷新（用户可能刚从别的页面回来），提示只打一次
+        if (pendingNotified) return
+        pendingNotified = true
+        when (p) {
+            RootController.Pending.NONE -> Unit
             RootController.Pending.REBOOTED -> {
                 btnEnable.text = getString(R.string.btn_continue)
                 appendLog("---")
@@ -382,7 +392,7 @@ REDMI K90 Max / OS4.0.0.14.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536
 <b>项目限制</b><br>
 · 临时 root：重启即失效，不写 boot 分区，不做持久化<br>
 · 前提：Shizuku（或 Shevery 等兼容实现）已在运行 + KernelSU 管理器已安装<br>
-· 约 40% 概率触发内核 panic 并重启（实测 17 次里 7 次）<br>
+· 约 40% 概率触发内核 panic 并重启（实测 17 次里 7 次）<br>· 系统负载高时失败率更高。状态行会显示当前负载，<b>「偏高」时建议先等一等</b><br>
 · 成功后内核里会留一颗 dangling timer，之后可能随机崩溃，重启清除<br>
 · 不提供 Magisk 模块、Zygisk、隐藏、开机自启<br>
 · 仅在 prague 这一款设备上验证过<br><br>

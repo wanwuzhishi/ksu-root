@@ -137,7 +137,25 @@ adb -s $S shell 'ps -A -o pid,user,args | grep shizuku_server | grep -v grep'
 > 用 `app_process ... moe.shizuku.server.ShizukuService` 会立刻退出（EXIT=0 但无常驻进程）。
 > 这条命令对 Shevery 同样有效（已实测），因为启动器实现一致。
 
-### 3.2 确认 App 侧状态
+### 3.2 检查系统负载（决定要不要现在跑）
+
+`stage0` 依赖线程竞争时序，负载高时失败即 panic。**不要跳过这一步**：
+
+```bash
+adb -s $S shell 'echo "uptime=$(cut -d. -f1 /proc/uptime) load=$(cut -d" " -f1 /proc/loadavg)"'
+```
+
+判据：
+
+| 读数 | 判断 |
+|---|---|
+| `load1 > 8` | 别跑。等 or 让用户关后台应用 |
+| `uptime < 300` | 别跑。系统刚起来，后台服务还在抢 CPU |
+| `load1 <= 8` 且 `uptime >= 300` | 可以跑 |
+
+真机实测：OS4.0.0.14 刚开机 `load` 能到 20–35（8 核），这个状态下连跑连崩。**不要相信「等两分钟就好」**——实测 `posix_timers_cache` 会稳定在 256 不收放，`load` 也需要好几分钟才降。
+
+### 3.3 确认 App 侧状态
 
 ```bash
 adb -s $S shell 'am force-stop com.ksuroot.app'
