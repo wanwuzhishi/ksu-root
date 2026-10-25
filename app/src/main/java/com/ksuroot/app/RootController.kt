@@ -296,17 +296,30 @@ object RootController {
         ShizukuHelper.exec("stat -c %s '$path' 2>/dev/null || echo -1")
             .trim().lines().firstOrNull()?.trim()?.toLongOrNull() ?: -1L
 
-    /** App 无权直接写 /data/local/tmp，用 `cat > path` 通过 Shizuku 的 stdin 灌字节流。 */
+    /**
+     * App 无权直接写 /data/local/tmp，用 `cat > path` 通过 Shizuku 的 stdin 灌字节流。
+     *
+     * 判据只看文件大小，不看 waitFor。ShizukuRemoteProcess.waitFor(timeout, unit) 实测会
+     * 返回 false——哪怕进程已经正常退出、文件也已完整落盘（918 字节的脚本被它连判 3 次
+     * "写入失败"，而设备上那份文件的大小和时间戳都是对的）。同一个类的 exitValue() 之前
+     * 也抛过 IllegalThreadStateException，这个封装对"进程是否结束"的反馈整体不可信。
+     */
     private fun writeViaStdin(path: String, bytes: ByteArray): Boolean = try {
         val p = ShizukuHelper.newProcess(arrayOf("sh", "-c", "cat > '$path'"))
         p.outputStream.use {
             it.write(bytes)
             it.flush()
         }
-        // 5 MB 的 ksud 经 binder 传输不快，给足 5 分钟。
-        // 只信 waitFor 的返回值：ShizukuRemoteProcess.exitValue() 会抛
-        // IllegalThreadStateException("process hasn't exited")，之前正是它把写入判成了失败。
-        p.waitFor(300, TimeUnit.SECONDS)
+        val want = bytes.size.toLong()
+        var ok = false
+        for (round in 1..3) {
+            Thread.sleep(700)
+            if (sizeOf(path) == want) {
+                ok = true
+                break
+            }
+        }
+        ok
     } catch (e: Throwable) {
         false
     }
