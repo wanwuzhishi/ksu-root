@@ -8,7 +8,9 @@ import android.graphics.drawable.InsetDrawable
 import android.os.Bundle
 import android.text.Html
 import android.text.method.LinkMovementMethod
+import android.view.View
 import android.widget.Button
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -28,6 +30,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnExport: Button
     private lateinit var btnCopy: Button
     private lateinit var tvAbout: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var tvProgress: TextView
 
     private val logBuf = StringBuilder()
     private var running = false
@@ -56,6 +60,8 @@ class MainActivity : AppCompatActivity() {
         btnExport = findViewById(R.id.btnExport)
         btnCopy = findViewById(R.id.btnCopy)
         tvAbout = findViewById(R.id.tvAbout)
+        progressBar = findViewById(R.id.progressBar)
+        tvProgress = findViewById(R.id.tvProgress)
 
         btnCheck.setOnClickListener { refresh() }
         btnEnable.setOnClickListener { startEnable() }
@@ -113,6 +119,37 @@ class MainActivity : AppCompatActivity() {
             logBuf.append(s).append('\n')
             tvLog.text = logBuf.toString()
             scrollLog.post { scrollLog.fullScroll(ScrollView.FOCUS_DOWN) }
+            updateProgress(s)
+        }
+    }
+
+    /**
+     * 从日志里推阶段进度。exploit 那段要跑几分钟，光看「[4/5]」不动会让人以为卡死，
+     * 所以额外解析 attempt 计数，让进度条在那几分钟里往前走。
+     */
+    private fun updateProgress(line: String) {
+        // 只有真正在跑的时候才推进度。断点续跑的提示日志里也带「[4/5]」，
+        // 不挡住的话空闲状态会莫名其妙显示 60%。
+        if (!running) return
+        val pct = when {
+            line.contains("=== 成功") || line.contains("=== 失败") -> 100
+            line.contains("[1/5]") -> 8
+            line.contains("[2/5]") -> 25
+            line.contains("[3/5]") -> 45
+            line.contains("[5/5]") -> 92
+            line.contains("[4/5]") -> 60
+            else -> {
+                val m = ATTEMPT.find(line) ?: return
+                val n = m.groupValues[1].toIntOrNull() ?: return
+                // 60 → 90 之间按 attempt 数推进；attempts 上限 128，前 30 次占满这段
+                (60 + n.coerceAtMost(30) * 1.0).toInt().coerceAtMost(90)
+            }
+        }
+        progressBar.progress = pct
+        tvProgress.text = when {
+            pct >= 100 -> ""
+            pct > 0 -> "$pct%"
+            else -> ""
         }
     }
 
@@ -200,6 +237,9 @@ class MainActivity : AppCompatActivity() {
         btnExport.isEnabled = false
         btnCopy.isEnabled = false
         logBuf.setLength(0)
+        progressBar.visibility = View.VISIBLE
+        progressBar.progress = 0
+        tvProgress.text = ""
         appendLog("=== 开始 ===")
         lifecycleScope.launch {
             val ok = try {
@@ -215,6 +255,10 @@ class MainActivity : AppCompatActivity() {
             btnCopy.isEnabled = true
             running = false
             btnEnable.text = getString(R.string.btn_enable)
+            progressBar.postDelayed({
+                progressBar.visibility = View.GONE
+                tvProgress.text = ""
+            }, 1500)
             refresh()
         }
     }
@@ -267,6 +311,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** exploit 内部的尝试计数，用来让进度条在 [4/5] 那几分钟里往前走 */
+        private val ATTEMPT = Regex("ATTEMPT_BEGIN attempt=(\\d+)")
+
         private const val ENABLE_RISK_HTML = """
 <b>会做什么</b><br>
 运行 CVE-2026-64560 内核提权链，把 KernelSU 模块加载进内核。全程约 3–8 分钟，中途不能退出 App。<br><br>
