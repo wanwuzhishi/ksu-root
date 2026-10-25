@@ -43,6 +43,7 @@ object RootController {
     suspend fun checkStatus(ctx: Context): Status = withContext(Dispatchers.IO) {
         val shizuku = when {
             !ShizukuHelper.isShizukuInstalled(ctx) -> "未安装"
+            ShizukuHelper.incompatibleInstall(ctx) -> "版本不兼容"
             !ShizukuHelper.isBinderAlive() -> "未运行"
             !ShizukuHelper.hasPermission() -> "未授权"
             else -> "已就绪"

@@ -11,22 +11,43 @@ object ShizukuHelper {
     const val PERM_REQUEST = 1001
 
     /**
-     * 已知的 Shizuku 兼容管理器。Shevery 是 Shizuku 的 fork，保留了同名 binder service
-     * 与 `moe.shizuku.manager.permission.API_V23` 权限，只换了 App 包名。两者只能装一个。
+     * 已知的 Shizuku 兼容管理器。能否真正跑通取决于两件事，缺一不可：
+     *
+     *   1) 保留名为 `"shizuku"` 的 binder service 和 `IShizukuService` 的 AIDL 全名；
+     *   2) 保留 `moe.shizuku.manager.permission.API_V23` 这个权限名——官方
+     *      `dev.rikka.shizuku:api` 把该字符串硬编码在 checkPermission 里，改了就授不了权。
+     *
+     * 下面按「包名 → 兼容情况」标注。只换包名、权限名照抄的能直接跑；连权限名一起换成
+     * 自己前缀的，这里只能识别出「装了」，实际会停在未授权。
      */
     private val SHIZUKU_PKGS = listOf(
-        "moe.shizuku.privileged.api",   // 官方
-        "com.hamondev.shevery",         // Shevery
+        "moe.shizuku.privileged.api",   // 官方；yangFenTuoZi/Shizuku、rushiranpise/Shizuku-Next、ShizukuPlus 的 dropin 版同包名
+        "com.hamondev.shevery",         // Shevery（权限名保留 moe.*，实测可用）
+        "af.shizuku.plus.api",          // ShizukuPlus 独立版（权限名改成 af.shizuku.plus.permission.API_V23）
+        "kerneldroid.nightzuku",        // Nightzuku（权限名改成 kerneldroid.nightzuku.permission.API）
     )
 
-    fun isShizukuInstalled(ctx: Context): Boolean = SHIZUKU_PKGS.any { pkg ->
-        try {
-            ctx.packageManager.getPackageInfo(pkg, 0)
-            true
-        } catch (e: Throwable) {
-            false
-        }
+    /** 权限名与官方 API 库一致、能真正授权成功的包 */
+    private val API_COMPAT_PKGS = setOf(
+        "moe.shizuku.privileged.api",
+        "com.hamondev.shevery",
+    )
+
+    private fun isInstalled(ctx: Context, pkg: String): Boolean = try {
+        ctx.packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (e: Throwable) {
+        false
     }
+
+    fun isShizukuInstalled(ctx: Context): Boolean = SHIZUKU_PKGS.any { isInstalled(ctx, it) }
+
+    /** 设备上装了哪些已知管理器（用于状态行） */
+    fun installedPkgs(ctx: Context): List<String> = SHIZUKU_PKGS.filter { isInstalled(ctx, it) }
+
+    /** 装了，但装的是权限名不兼容的那个版本 */
+    fun incompatibleInstall(ctx: Context): Boolean =
+        installedPkgs(ctx).let { it.isNotEmpty() && it.none { p -> p in API_COMPAT_PKGS } }
 
     fun isBinderAlive(): Boolean = try {
         Shizuku.pingBinder()

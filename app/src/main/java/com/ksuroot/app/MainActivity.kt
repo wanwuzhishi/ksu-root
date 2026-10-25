@@ -374,11 +374,14 @@ REDMI K90 Max / OS4.0.0.14.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536
 
 <b>项目限制</b><br>
 · 临时 root：重启即失效，不写 boot 分区，不做持久化<br>
-· 前提：Shizuku 已在运行 + KernelSU 管理器已安装<br>
+· 前提：Shizuku（或 Shevery 等兼容实现）已在运行 + KernelSU 管理器已安装<br>
 · 约 40% 概率触发内核 panic 并重启（实测 17 次里 7 次）<br>
 · 成功后内核里会留一颗 dangling timer，之后可能随机崩溃，重启清除<br>
 · 不提供 Magisk 模块、Zygisk、隐藏、开机自启<br>
 · 仅在 prague 这一款设备上验证过<br><br>
+
+<b>支持的 Shizuku 实现</b><br>
+官方 Shizuku 与 Shevery <b>已实测可用</b>。Shizuku-Next、yangFenTuoZi/Shizuku、ShizukuPlus 的 dropin 版与其同包名同权限名，理论可用。Nightzuku 和 ShizukuPlus 独立版把权限名改成了自己的前缀，官方 API 库请求不到，暂不兼容。<br><br>
 
 <b>免责声明</b><br>
 本软件仅供安全研究与自有设备调试使用。使用即表示你已知悉并接受：<br>

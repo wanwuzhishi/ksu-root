@@ -59,7 +59,7 @@
    - 从 [RikkaApps/Shizuku](https://github.com/RikkaApps/Shizuku/releases) 下载官方版（**不要用各种"优化版""内置 adb 版"，实测有假包**）
    - 用 adb 或无线调试启动服务
    - 授权本 App
-   - **Shevery 也支持**：[HmnDev-Tech/shevery](https://github.com/HmnDev-Tech/shevery) 是 Shizuku 的 fork，保留了同名 binder service 与 `moe.shizuku.manager.permission.API_V23` 权限，只换了包名（`com.hamondev.shevery`）。本 App 已适配它的包名。注意**两者只能装一个**，装 Shevery 前必须先卸载官方 Shizuku
+   - 也支持第三方实现，详见下面的「兼容的 Shizuku 实现」
 
 2. **KernelSU 管理器已安装**
    - 从 [tiann/KernelSU](https://github.com/tiann/KernelSU/releases) 下载
@@ -116,6 +116,29 @@ adb shell "setsid $BASE/lib/arm64/libshizuku.so --apk=$BASE/base.apk > /dev/null
 > 官方启动器是伪装成 `.so` 的 native 可执行文件，**必须带 `--apk=` 参数**。直接 `app_process` 调会立刻退出。
 
 **开机自启不可靠**：Shizuku 的 `BootCompleteReceiver` 有 ADB 分支，但实测 3 次重启只有 1 次成功拉起，`adbStart()` 大多数时候没执行。别指望它。
+
+---
+
+## 兼容的 Shizuku 实现
+
+本 App 通过官方 `dev.rikka.shizuku:api` 连接 Shizuku 服务，所以能不能用取决于两件事，**缺一不可**：
+
+1. 保留名为 `"shizuku"` 的 binder service，以及 `IShizukuService` 的 AIDL 全名；
+2. 保留 `moe.shizuku.manager.permission.API_V23` 这个权限名 —— 官方 API 库把它**硬编码**在 `checkSelfPermission()` 里，fork 改成自己前缀后就请求不到授权。
+
+| 实现 | 包名 | 权限名 | 状态 |
+|---|---|---|---|
+| [RikkaApps/Shizuku](https://github.com/RikkaApps/Shizuku)（官方） | `moe.shizuku.privileged.api` | `moe.shizuku.manager.permission.API_V23` | ✅ 已实测 |
+| [HmnDev-Tech/shevery](https://github.com/HmnDev-Tech/shevery) | `com.hamondev.shevery` | 保留 `moe.*` | ✅ 已实测 |
+| [yangFenTuoZi/Shizuku](https://github.com/yangFenTuoZi/Shizuku) | `moe.shizuku.privileged.api` | 同官方 | ⚪ 同包名同权限，理论可用 |
+| [rushiranpise/Shizuku-Next](https://github.com/rushiranpise/Shizuku-Next) | `moe.shizuku.privileged.api` | `moe.shizuku.manager.permission.API_V23` | ⚪ 同上 |
+| [thejaustin/ShizukuPlus](https://github.com/thejaustin/ShizukuPlus) 的 `dropin` 版 | `moe.shizuku.privileged.api` | `af.shizuku.plus.permission.API_V23` | ⚪ 同上 |
+| thejaustin/ShizukuPlus 的 `shizukuplus` 独立版 | `af.shizuku.plus.api` | `af.shizuku.plus.permission.API_V23` | ❌ 权限名不同 |
+| [kerneldroid/Nightzuku](https://github.com/kerneldroid/Nightzuku) | `kerneldroid.nightzuku` | `kerneldroid.nightzuku.permission.API` | ❌ 权限名不同 |
+
+「已实测」= 我在真机上跑过整套流程。「理论可用」= 包名和权限名都与官方一致，服务协议没改，但没装机试过。打 ❌ 的两个是权限名换成了自己的前缀，App 能识别出「装了」但授权会失败，状态行会显示 `Shizuku: 版本不兼容`。
+
+**注意**：这些 fork 之间**签名冲突，只能装一个**。装新的之前先卸旧的。
 
 ---
 

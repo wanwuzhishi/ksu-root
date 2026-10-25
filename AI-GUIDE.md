@@ -106,6 +106,16 @@ KSU 管理器 已安装 ✅
 
 ### 3.1 启动 Shizuku（如果没在运行）
 
+> **先确认装的是哪个实现。** 官方、Shevery、Shizuku-Next、yangFenTuoZi/Shizuku、ShizukuPlus dropin 版都能用；
+> Nightzuku 与 ShizukuPlus 独立版改了权限名，**不要在这些设备上继续**（App 状态行会显示 `版本不兼容`）。
+> 查一下装了哪个：
+
+```bash
+for p in moe.shizuku.privileged.api com.hamondev.shevery af.shizuku.plus.api kerneldroid.nightzuku; do
+  adb -s $S shell "pm path $p" 2>/dev/null | grep -q package && echo "found: $p"
+done
+```
+
 **方式 A：让用户在手机上点**（推荐，最稳）
 
 告诉用户：
@@ -115,7 +125,8 @@ KSU 管理器 已安装 ✅
 **方式 B：adb 启动**
 
 ```bash
-BASE=$(adb -s $S shell 'pm path moe.shizuku.privileged.api' | tr -d '\r' | sed 's/^package://; s|/base.apk$||')
+PKG=moe.shizuku.privileged.api   # 或 com.hamondev.shevery 等
+BASE=$(adb -s $S shell "pm path $PKG" | tr -d '\r' | sed 's/^package://; s|/base.apk$||')
 adb -s $S shell "setsid $BASE/lib/arm64/libshizuku.so --apk=$BASE/base.apk > /tmp/shiz.log 2>&1 < /dev/null &"
 sleep 6
 adb -s $S shell 'ps -A -o pid,user,args | grep shizuku_server | grep -v grep'
@@ -124,6 +135,7 @@ adb -s $S shell 'ps -A -o pid,user,args | grep shizuku_server | grep -v grep'
 
 > **关键**：官方启动器是伪装成 `.so` 的 native 程序，**必须带 `--apk=` 参数**。
 > 用 `app_process ... moe.shizuku.server.ShizukuService` 会立刻退出（EXIT=0 但无常驻进程）。
+> 这条命令对 Shevery 同样有效（已实测），因为启动器实现一致。
 
 ### 3.2 确认 App 侧状态
 
