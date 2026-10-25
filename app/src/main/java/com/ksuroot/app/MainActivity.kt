@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.launch
+import java.util.Locale
 import rikka.shizuku.Shizuku
 
 class MainActivity : AppCompatActivity() {
@@ -157,11 +158,17 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             tvStatus.text = "检查中 ..."
             val st = RootController.checkStatus(this@MainActivity)
+            val uptime = RootController.uptimeSec()
+            val load1 = RootController.load1m()
             tvStatus.text = buildString {
                 append("Shizuku: ").append(st.shizuku).append('\n')
                 append("root: ").append(if (st.root) "已开启 ✅" else "未开启").append('\n')
                 append("SELinux: ").append(st.selinux).append('\n')
-                append("模块: ").append(if (st.module.contains("kernelsu")) "kernelsu 已加载" else "未加载")
+                append("模块: ").append(if (st.module.contains("kernelsu")) "kernelsu 已加载" else "未加载").append('\n')
+                append("系统: ").append(String.format(Locale.US, "负载 %.1f", load1))
+                if (!st.root && (uptime < 300 || load1 > 8f)) {
+                    append(" · 偏高，建议等系统闲下来再开")
+                }
             }
         }
     }

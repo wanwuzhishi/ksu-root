@@ -54,6 +54,16 @@ object RootController {
         Status(shizuku, suId.contains("uid=0"), module, selinux, suId)
     }
 
+    // ---------------------------------------------------------------- 系统状态
+
+    /** 开机到现在的秒数，用于判断系统是否刚起来 */
+    fun uptimeSec(): Int =
+        ShizukuHelper.exec("cut -d. -f1 /proc/uptime").trim().toIntOrNull() ?: 0
+
+    /** 1 分钟平均负载。stage0 靠线程竞争拿窗口，负载越高越容易打偏。 */
+    fun load1m(): Float =
+        ShizukuHelper.exec("cut -d' ' -f1 /proc/loadavg").trim().toFloatOrNull() ?: 0f
+
     // ---------------------------------------------------------------- 断点续跑
 
     private const val PREF = "ksu_root_state"
