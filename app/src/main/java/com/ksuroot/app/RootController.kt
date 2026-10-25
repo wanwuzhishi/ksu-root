@@ -158,6 +158,18 @@ object RootController {
         }
         log("  OK")
 
+        // stage0 依赖几个线程的精确竞争时序。系统负载高的时候调度抖动大，
+        // 竞争窗口错位，rb_erase 就会拿一棵对不上的红黑树去改，直接 panic。
+        // 实测过三次 panic 都发生在开机后 90-100 秒、load average 20+ 的时候。
+        // 这里只提醒，不拦截 —— 用户可能就是想试。
+        val uptime = ShizukuHelper.exec("cut -d. -f1 /proc/uptime").trim().toIntOrNull() ?: 0
+        val load1 = ShizukuHelper.exec("cut -d' ' -f1 /proc/loadavg").trim().toFloatOrNull() ?: 0f
+        if (uptime < 300 || load1 > 8f) {
+            log("  注意：设备启动 ${uptime}s、1 分钟负载 ${load1}，系统还在忙。")
+            log("  此时跑失败率高（stage0 竞争窗口会被调度抖动打偏，失败就是 panic）。")
+            log("  建议等到开机 5 分钟以上、负载降到 5 以下再试。")
+        }
+
         step("[2/5] 部署载荷到 $WORK_DIR ...")
         if (!ensureFiles(ctx, log)) return false
         // 上游仓库自带的 kernelsu-prague.ko 是 uapi=2 的旧模块。exploit 内部硬编码了
