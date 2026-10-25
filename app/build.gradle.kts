@@ -11,8 +11,8 @@ android {
         applicationId = "com.ksuroot.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     buildTypes {
@@ -30,6 +30,8 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        // 关于页要从 BuildConfig 读版本号，AGP 8 默认关闭该特性
+        buildConfig = true
     }
     packaging {
         resources {

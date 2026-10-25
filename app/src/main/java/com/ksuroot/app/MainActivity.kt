@@ -351,7 +351,7 @@ class MainActivity : AppCompatActivity() {
         """
 
         private const val ABOUT_HTML = """
-<b>KSU Root v1.0.0</b><br>
+<b>KSU Root v${BuildConfig.VERSION_NAME}</b><br>
 临时 root 工具，重启即失效。<br><br>
 
 <b>项目地址</b><br>
