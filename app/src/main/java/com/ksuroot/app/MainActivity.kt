@@ -176,8 +176,14 @@ class MainActivity : AppCompatActivity() {
                 append("SELinux: ").append(st.selinux).append('\n')
                 append("模块: ").append(if (st.module.contains("kernelsu")) "kernelsu 已加载" else "未加载").append('\n')
                 append("系统: ").append(String.format(Locale.US, "负载 %.1f", load1))
-                if (!st.root && (uptime < 300 || load1 > 8f)) {
-                    append(" · 偏高，建议等系统闲下来再开")
+                if (!st.root) {
+                    // 刚开机和负载高是两件事，提示要分开说，
+                    // 否则会出现「负载 0.0 · 偏高」这种自相矛盾的显示
+                    if (uptime < 300) {
+                        append(" · 刚开机 ").append(uptime).append("s，建议等 5 分钟")
+                    } else if (load1 > 8f) {
+                        append(" · 偏高，建议等系统闲下来再开")
+                    }
                 }
             }
         }

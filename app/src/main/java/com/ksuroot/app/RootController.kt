@@ -75,6 +75,36 @@ object RootController {
     /** NONE=没有未完成任务，REBOOTED=上次被整机重启打断，KILLED=上次进程被杀但设备没重启 */
     enum class Pending { NONE, REBOOTED, KILLED }
 
+    // 失败的运行会在内核里留下脏东西：比如 PIPE_PREP_FAIL 之后，restore_misc_list 只把
+    // misc_list 的头指回去了，中间那个伪造的 miscdevice 节点没摘干净，它指向已释放的内存。
+    // 不重启就再跑，下一次 misc_open 遍历链表必然踩到 —— 实测 pstore 里就是
+    // misc_open+0x4c 崩的，x23 正是上一轮的 misc_list head。
+    private const val KEY_DIRTY = "dirty"
+    private const val KEY_DIRTY_BOOT = "dirty_boot"
+
+    /** 记录「这次跑完内核可能不干净」。成功一次会清掉。 */
+    fun markDirty(ctx: Context) {
+        prefs(ctx).edit()
+            .putBoolean(KEY_DIRTY, true)
+            .putLong(KEY_DIRTY_BOOT, SystemClock.elapsedRealtime())
+            .apply()
+    }
+
+    fun clearDirty(ctx: Context) {
+        prefs(ctx).edit().putBoolean(KEY_DIRTY, false).apply()
+    }
+
+    /**
+     * true = 上次失败后还没重启过，此时再跑会在 misc_open 阶段 panic。
+     * 判据同 pending()：elapsedRealtime 变小说明中间重启过，内核已经干净了。
+     */
+    fun blockedByDirtyState(ctx: Context): Boolean {
+        val p = prefs(ctx)
+        if (!p.getBoolean(KEY_DIRTY, false)) return false
+        val dirtyBoot = p.getLong(KEY_DIRTY_BOOT, 0L)
+        return SystemClock.elapsedRealtime() >= dirtyBoot
+    }
+
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
 
     fun markRunning(ctx: Context, step: String) {
@@ -142,9 +172,23 @@ object RootController {
     // ---------------------------------------------------------------- 主流程
 
     suspend fun enableRoot(ctx: Context, log: (String) -> Unit): Boolean = withContext(Dispatchers.IO) {
+        if (blockedByDirtyState(ctx)) {
+            log("上次运行失败后没有重启过。")
+            log("内核里还留着脏节点（伪造的 miscdevice 在 misc_list 里没摘干净），")
+            log("不重启就再跑，会在 misc_open 阶段 panic。请重启手机后再试。")
+            return@withContext false
+        }
         markRunning(ctx, "启动")
+        var ok = false
         try {
-            runSteps(ctx, log)
+            ok = runSteps(ctx, log)
+            // 只有完整成功才算内核干净。中途任何一步失败都要标记，
+            // 因为失败点可能在 restore 之后，链表/红黑树未必复原。
+            if (ok) clearDirty(ctx) else markDirty(ctx)
+            ok
+        } catch (e: Throwable) {
+            markDirty(ctx)
+            throw e
         } finally {
             // 正常返回（成功/失败）都清掉；panic 重启时进程被杀，这里不会执行，标记就留下来了
             clearRunning(ctx)
