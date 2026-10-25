@@ -9,18 +9,21 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pin 24.04: ubuntu-latest migrates to Ubuntu 26 after 2026-10-19,
+    # and NDK / aapt2 availability may differ there.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      # v5+ runs on Node 24 (v4 used Node 20, deprecated by GitHub)
+      - uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -29,7 +32,7 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
@@ -42,7 +45,7 @@ jobs:
           for f in pk64560 ptyrun kp_arm.sh ksu_load_setup.sh; do
             unzip -l "$APK" | grep -q "assets/$f" || { echo "missing asset: $f"; exit 1; }
           done
-          # ksud / busybox 不应出现在 APK 里（GPL 合规）
+          # ksud / busybox must not be bundled (GPL compliance)
           if unzip -l "$APK" | grep -qE 'assets/(ksud|busybox)'; then
             echo "GPL binaries must not be bundled"; exit 1
           fi
