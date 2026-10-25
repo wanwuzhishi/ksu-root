@@ -226,6 +226,23 @@ lr : timerqueue_del+0x48/0x74
 >
 > **但完整流程尚未在真机上复测。** 如果你跑通了或跑挂了，欢迎开 issue。
 
+## 失败之后必须先重启，不能直接重试
+
+**这条最容易被忽略，代价也最大。**
+
+exploit 中途失败时（`PIPE_PREP_FAIL`、`ATTEMPT_MISS` 之类），虽然它自己会打印 `KERNEL_STATE_RESTORE_PASS dirty=0`，看起来把内核改回去收干净了，但实际并不彻底：
+
+`restore_misc_list` 只把 `misc_list` 的头指针指回去，中间那个伪造的 `miscdevice` 节点**没有从链表里摘下来**，而它指向的内存已经被释放。这时如果直接再点一次「开启」，下一次 `misc_open` 遍历链表就会踩到这块已释放内存直接 panic。pstore 里留下的是：
+
+```
+pc : [0xffffffdd63bdf810] misc_open+0x4c/0x180
+x23: ffffffdd6589f178     ← 正是上一轮日志里那个 MISC_LIST_RESTORE_SCAN head
+```
+
+之所以说它「阴」，是因为**它不会当场崩**：上一轮失败后系统看起来一切正常，`getenforce` 还是 Enforcing、`boot_id` 还是原来那个，你可以正常用手机。等你过十分钟再点一次，才会崩。
+
+v1.0.3 起 App 会在跑之前检查这个状态，检测到「上次失败且没重启过」就直接拒绝并提示重启，不会再让你白跑一趟（白跑的结果是 panic）。
+
 ## 已知限制
 
 - **重启即失效**，无持久化
