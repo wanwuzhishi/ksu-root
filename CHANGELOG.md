@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.5] - 2026-10-28
+
+### 新增
+
+- **运行日志实时落盘**（App 私有目录 `files/run.log`）。之前日志只在内存里，exploit 触发内核 panic 时进程被直接干掉，日志一行都留不下，出了问题只能靠猜。现在每行同步写文件，重启后 `adb shell run-as com.ksuroot.app cat files/run.log` 就能看到它崩在哪一步。
+
 ## [1.0.4] - 2026-10-28
 
 ### 修复

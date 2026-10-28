@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.Locale
 import rikka.shizuku.Shizuku
 
@@ -131,6 +132,12 @@ class MainActivity : AppCompatActivity() {
             tvLog.text = logBuf.toString()
             scrollLog.post { scrollLog.fullScroll(ScrollView.FOCUS_DOWN) }
             updateProgress(s)
+        }
+        // 同步落盘：exploit 跑飞时内核直接 panic，进程来不及做任何收尾，
+        // 日志只在内存里等于没有。写到 App 私有目录，重启后还能 cat 出来。
+        try {
+            File(filesDir, "run.log").appendText(s + "\n")
+        } catch (_: Throwable) {
         }
     }
 
@@ -261,6 +268,10 @@ class MainActivity : AppCompatActivity() {
         btnExport.isEnabled = false
         btnCopy.isEnabled = false
         logBuf.setLength(0)
+        try {
+            File(filesDir, "run.log").writeText("")
+        } catch (_: Throwable) {
+        }
         progressBar.visibility = View.VISIBLE
         progressBar.progress = 0
         tvProgress.text = ""
