@@ -28,6 +28,7 @@
 - **`ShizukuRemoteProcess` 的 `waitFor` / `exitValue` 不可信**：`waitFor(300s)` 在进程已退出、文件已完整落盘时仍返回 false，`exitValue()` 抛 `IllegalThreadStateException("process hasn't exited")`。改成「读流 join 判结束」+「按文件大小轮询判写入」
 - **dirty 状态的判据**：原来用 `elapsedRealtime() >= dirtyBoot` 判「没重启」，只在「重启了」一侧成立，重启后隔几分钟再开 App 会被误判成「没重启」而一直被拦。改成比 `bootWallTime() = currentTimeMillis() - elapsedRealtime()`，容差 10 秒
 - **中断提示重复打印**：`checkPending()` 被 `onResume` 反复触发，同一笔提示打两遍
+- **`su` 被隐藏插件屏蔽时误报「未开启」**：FuseHide / HMA / Shamiko 这类 Zygisk 隐藏模块会把 `/system/bin/su` 对特定调用链藏起来。此时内核模块确实加载了、`adb shell` 里 `su` 也能用，但 App 经 Shizuku fork 出来的进程看不到 `su`，状态行就误报「未开启」。改成显示「模块已加载，但 su 不可用（检查隐藏插件）」
 
 ### 实测
 
