@@ -198,6 +198,7 @@ class MainActivity : AppCompatActivity() {
         html: String,
         confirmText: String,
         showCancel: Boolean = true,
+        cancelText: String = "取消",
         onConfirm: () -> Unit
     ) {
         val tv = TextView(this).apply {

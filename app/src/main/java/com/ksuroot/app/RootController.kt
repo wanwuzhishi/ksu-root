@@ -82,11 +82,21 @@ object RootController {
     private const val KEY_DIRTY = "dirty"
     private const val KEY_DIRTY_BOOT = "dirty_boot"
 
+    /**
+     * 本次开机的「墙上时间起点」= 当前时刻 - 开机时长。重启后这值会变（晚至少几秒）。
+     *
+     * 为什么不用 elapsedRealtime 记：它还原本能判断「重启过没」（变小就是重启过），
+     * 但拿来判断「没重启过」会误判——失败时开机 171 秒、重启后隔 5 分钟才开 App，
+     * 这时的 elapsedRealtime 比记录值大，就被当成「没重启」，于是重启完还是被拦住。
+     * 线上真踩到过这个。
+     */
+    private fun bootWallTime(): Long = System.currentTimeMillis() - SystemClock.elapsedRealtime()
+
     /** 记录「这次跑完内核可能不干净」。成功一次会清掉。 */
     fun markDirty(ctx: Context) {
         prefs(ctx).edit()
             .putBoolean(KEY_DIRTY, true)
-            .putLong(KEY_DIRTY_BOOT, SystemClock.elapsedRealtime())
+            .putLong(KEY_DIRTY_BOOT, bootWallTime())
             .apply()
     }
 
@@ -96,13 +106,18 @@ object RootController {
 
     /**
      * true = 上次失败后还没重启过，此时再跑会在 misc_open 阶段 panic。
-     * 判据同 pending()：elapsedRealtime 变小说明中间重启过，内核已经干净了。
+     * 判据：本次开机的墙上时间和记录值在同一个 boot 内几乎相同（只差毫秒抖动），
+     * 重启后 bootWallTime 会往后跳，差值远超容差，就认为内核已经干净了。
      */
     fun blockedByDirtyState(ctx: Context): Boolean {
         val p = prefs(ctx)
         if (!p.getBoolean(KEY_DIRTY, false)) return false
-        val dirtyBoot = p.getLong(KEY_DIRTY_BOOT, 0L)
-        return SystemClock.elapsedRealtime() >= dirtyBoot
+        val dirtyBootWall = p.getLong(KEY_DIRTY_BOOT, 0L)
+        if (dirtyBootWall <= 0L) return false
+        // 老版本存的是 elapsedRealtime（开机毫秒数，通常 < 1e7），
+        // 和新格式（epoch 秒级时间戳，约 1e12 量级）差好几个数量级，直接忽略
+        if (dirtyBootWall < 1_000_000_000_000L) return false
+        return kotlin.math.abs(bootWallTime() - dirtyBootWall) < 10_000L
     }
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -314,12 +329,6 @@ object RootController {
      * 这样版本永远等于用户手上那个管理器，不会出现内核/用户空间 uapi 不匹配。
      */
     private fun ensureKsud(log: (String) -> Unit): Boolean {
-        val existing = sizeOf("$WORK_DIR/ksud")
-        if (existing >= KSUD_MIN_BYTES) {
-            log("  ksud 已就绪 ($existing bytes)")
-            return true
-        }
-
         val apk = ShizukuHelper.exec(
             "pm path $KSU_PKG 2>/dev/null | head -1 | sed 's/^package://'"
         ).trim()
@@ -328,14 +337,29 @@ object RootController {
             return false
         }
         val baseDir = apk.removeSuffix("/base.apk")
-        log("  从 $KSU_PKG 提取 ksud ...")
+        val src = "$baseDir/lib/arm64/libksud.so"
+        val srcSize = sizeOf(src)
+
+        // 不能只看「已经有一个够大的 ksud 就直接用」：用户升级或降级管理器之后，
+        // 旧 ksud 内嵌的是旧 ko，加载上去和新管理器 uapi 对不上，管理器会一直报
+        // 「需要更新内核」而且 su 拿不到。线上就被这个坑过。
+        if (srcSize >= KSUD_MIN_BYTES && sizeOf("$WORK_DIR/ksud") == srcSize) {
+            log("  ksud 已就绪 ($srcSize bytes，与当前管理器一致)")
+            return true
+        }
+        if (srcSize < KSUD_MIN_BYTES) {
+            log("  读不到管理器内的 libksud.so（$srcSize bytes @ $src）")
+            return false
+        }
+
+        log("  从 $KSU_PKG 提取 ksud ($srcSize bytes) ...")
         val out = ShizukuHelper.exec(
-            "cp '$baseDir/lib/arm64/libksud.so' $WORK_DIR/ksud && " +
+            "cp '$src' $WORK_DIR/ksud && " +
                 "chmod 755 $WORK_DIR/ksud && stat -c %s $WORK_DIR/ksud", 90
         ).trim()
         val size = out.lines().lastOrNull()?.trim()?.toLongOrNull() ?: -1L
-        if (size < KSUD_MIN_BYTES) {
-            log("  提取失败（$out）；请确认 KernelSU 管理器已安装且为 arm64 版本")
+        if (size != srcSize) {
+            log("  提取失败（期望 $srcSize，实际 $out）")
             return false
         }
         log("  ksud 提取成功 ($size bytes)")
