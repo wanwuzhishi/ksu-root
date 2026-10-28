@@ -343,7 +343,7 @@ object RootController {
         // 不能只看「已经有一个够大的 ksud 就直接用」：用户升级或降级管理器之后，
         // 旧 ksud 内嵌的是旧 ko，加载上去和新管理器 uapi 对不上，管理器会一直报
         // 「需要更新内核」而且 su 拿不到。线上就被这个坑过。
-        if (srcSize >= KSUD_MIN_BYTES && sizeOf("$WORK_DIR/ksud") == srcSize) {
+        if (srcSize >= KSUD_MIN_BYTES && ksudLooksValid(srcSize)) {
             log("  ksud 已就绪 ($srcSize bytes，与当前管理器一致)")
             return true
         }
@@ -362,8 +362,29 @@ object RootController {
             log("  提取失败（期望 $srcSize，实际 $out）")
             return false
         }
+        // 大小对还不够。线上真见过大小完全正确、内容全是 NUL 的 ksud：
+        // cp 静默失败时就这样，ksud 不报错也不干活，一路「成功」到最后 su 不存在。
+        if (!ksudLooksValid(srcSize)) {
+            log("  提取出的 ksud 内容异常（大小对但文件头不是 ELF），用流方式重写 ...")
+            ShizukuHelper.exec(
+                "cat '$src' > $WORK_DIR/ksud && chmod 755 $WORK_DIR/ksud", 120
+            )
+            if (!ksudLooksValid(srcSize)) {
+                log("  ksud 提取失败，请卸载重装 KernelSU 管理器后再试")
+                return false
+            }
+        }
         log("  ksud 提取成功 ($size bytes)")
         return true
+    }
+
+    /** ksud 得能跑起来才算数：大小对 + 文件头是 ELF magic */
+    private fun ksudLooksValid(wantSize: Long): Boolean {
+        if (sizeOf("$WORK_DIR/ksud") != wantSize) return false
+        val magic = ShizukuHelper.exec(
+            "head -c 4 $WORK_DIR/ksud | od -An -tx1 | tr -d ' \\n'", 15
+        ).trim()
+        return magic == "7f454c46"
     }
 
     /** 一条命令取回全部载荷的字节数；缺失的记 -1 */
