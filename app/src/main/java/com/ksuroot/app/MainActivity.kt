@@ -179,7 +179,15 @@ class MainActivity : AppCompatActivity() {
             val load1 = RootController.load1m()
             tvStatus.text = buildString {
                 append("Shizuku: ").append(st.shizuku).append('\n')
-                append("root: ").append(if (st.root) "已开启 ✅" else "未开启").append('\n')
+                when {
+                    st.root -> append("root: 已开启 ✅")
+                    // 模块在但 su 调不通：多半是 FuseHide / HMA / Shamiko 这类
+                    // 隐藏插件把 /system/bin/su 对这条调用链藏起来了，
+                    // 不是没 root，所以别直接报「未开启」误导人
+                    st.module.contains("kernelsu") ->
+                        append("root: 模块已加载，但 su 不可用（检查隐藏插件）")
+                    else -> append("root: 未开启")
+                }.append('\n')
                 append("SELinux: ").append(st.selinux).append('\n')
                 append("模块: ").append(if (st.module.contains("kernelsu")) "kernelsu 已加载" else "未加载").append('\n')
                 append("系统: ").append(String.format(Locale.US, "负载 %.1f", load1))
