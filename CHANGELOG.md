@@ -1,53 +1,44 @@
 # Changelog
 
-## [1.0.7] - 2026-10-28
+## [1.0.3] - 2026-10-28
 
-### 修复
-
-- **`ShizukuHelper.exec()` 泄漏 pipe**：每条 Shizuku 命令都是一对 pipe，之前只在超时那一刻 `destroyForcibly()`，正常返回的路径上流和远程进程都交给 GC——而 GC 什么时候跑不确定。这些 pipe 挂在 `shell` 用户头上，exploit 后期 `F_SETPIPE_SZ` 要占 117×128=14976 页（`pipe-user-pages-soft` 默认 16384 页），几个泄漏就足以把余量吃干净
-  - 表现：`PIPE_PREP_FAIL stage=grow_reclaim index=72/73/77/78 errno=1`（EPERM）
-  - 修法：`finally` 里显式 `close()` 三条流 + `destroy()` 回收远程进程
-
-### 实测
-
-改完重启一次、第二次成功：`su -c id` → `uid=0(root) ... context=u:r:ksu:s0`，`kernelsu 221184 1 - Live`，`/system/bin/su` 4990848 B。
-
-> 注意：不能断言是这一处修复的功劳——之前也重试过多次。但修之前连续 5 次失败（3 次 `PIPE_PREP_FAIL` + 2 次 stage0 panic），修之后 2 次内成功，方向是对的。
-
-## [1.0.6] - 2026-10-28
-
-### 修复
-
-- **ksud 内容校验**：之前只比对文件大小，线上遇到大小完全正确（4990848 B）但内容全是 NUL 的 ksud —— `cp` 静默失败时就会这样，ksud 既不报错也不干活，一路「成功」到最后 `su` 不存在。现在额外校验文件头是否为 ELF magic（`7f 45 4c 46`），不对就用 `cat` 流方式重写一次，还不对就明确报错。
-
-## [1.0.5] - 2026-10-28
+> 本版把开发过程中的 1.0.3 ~ 1.0.7 合并发布：中间那些版本号没有对外发过，
+> 用户看到的发布序列只有 1.0.0 / 1.0.1 / 1.0.2 / 1.0.3 四个。
 
 ### 新增
 
-- **运行日志实时落盘**（App 私有目录 `files/run.log`）。之前日志只在内存里，exploit 触发内核 panic 时进程被直接干掉，日志一行都留不下，出了问题只能靠猜。现在每行同步写文件，重启后 `adb shell run-as com.ksuroot.app cat files/run.log` 就能看到它崩在哪一步。
-
-## [1.0.4] - 2026-10-28
-
-### 修复
-
-- **重启后仍被「上次没重启过」拦住**：判断用的是 `SystemClock.elapsedRealtime() >= 记录值`。这个判据只在「重启了」这一侧成立（值会变小），放到「没重启」这一侧就错了——失败时开机 171 秒、重启后隔 5 分钟才开 App，`elapsedRealtime` 已经大于记录值，就被判成「没重启」，于是重启完还是被拦。改成记录本次开机的**墙上时间起点**（`currentTimeMillis - elapsedRealtime`），重启后这值会往后跳，同一个 boot 内只差毫秒。
-- **换管理器后仍用旧 ksud**：`ensureKsud` 原来只看「已经存在且 ≥4 MB 就直接用」。用户升级或降级 KernelSU 管理器之后，旧 ksud 内嵌的是旧 ko，加载上去和新管理器 uapi 对不上，管理器会一直报「需要更新内核」而且 su 拿不到。改成**按管理器 APK 里 `libksud.so` 的实际大小比对**，不一致就重抽。
-
-### 说明
-
-前一条是从线上反馈里定位的，用户当时「反复重启之后依然出现拦截提示」；后一条是在追同一个问题时顺带发现的——设备上的 ksud 是 5172384 B（旧管理器抽的），新管理器里的是 4990848 B。
-
-## [1.0.3] - 2026-10-26
+- **断点续跑**：跑之前记一笔状态，被系统杀掉或设备重启后，下次打开 App 会把按钮换成「继续上次（已中断）」并告诉你停在哪一步
+- **导出日志 / 复制日志**：日志写到 `下载/ksu-root-<时间>.txt`，或一键进剪贴板
+- **运行日志实时落盘**：每行同步写 `files/run.log`，panic 后也能拿到崩前的日志
+- **进度条**：按 `[N/5]` 阶段推进（8/25/45/60/92/100），`[4/5]` 那段额外解析 `ATTEMPT_BEGIN attempt=N` 让它在 60→90 继续走
+- **状态卡片显示系统负载**：`load1 > 8` 提示「偏高」，刚开机 `uptime < 300s` 提示「建议等 5 分钟」
+- **关于页**：项目地址、适配机型、实测通过的系统与内核、项目限制、免责声明、致谢（带链接）
+- **兼容第三方 Shizuku 实现**：官方 Shizuku / Shevery 已实测；Shizuku-Next、yangFenTuoZi/Shizuku、ShizukuPlus 的 dropin 版同包名同权限名理论可用；Nightzuku 和 ShizukuPlus 独立版权限名不同，状态行会显示「版本不兼容」
+- **失败后必须重启的硬拦截**：上一次失败且没重启过就再跑，会在 `misc_open` 阶段 panic。现在直接拒绝并提示重启
 
 ### 修复
 
-- **失败的运行会留下坏 miscdevice 节点**：`PIPE_PREP_FAIL` 之后 `restore_misc_list` 只把链表头指回去，中间那个伪造的 `miscdevice` 没摘干净，它指向已释放的内存。不重启就再跑，下一次 `misc_open` 遍历链表必然踩到——实测 pstore 里就是 `misc_open+0x4c` 崩的，寄存器 `x23` 正是上一轮的 `misc_list` head
-- **加硬拦截**：跑之前检查上次是不是失败退出且还没重启过。是的话直接拒绝并提示重启，不再让用户白跑一趟
-- **修「负载 0.0 · 偏高」的矛盾显示**：刚开机和负载高是两件事，拆成「刚开机 Ns，建议等 5 分钟」和「偏高，建议等系统闲下来再开」两种文案
+- **`ShizukuHelper.exec()` 泄漏 pipe**：每条 Shizuku 命令都是一对 pipe，之前只在超时那一刻 `destroyForcibly()`，正常返回路径上流和远程进程都交给 GC——而 GC 什么时候跑不确定。这些 pipe 挂在 `shell` 用户头上，exploit 后期 `F_SETPIPE_SZ` 要占 117×128=14976 页（`pipe-user-pages-soft` 默认 16384 页），几个泄漏就足以把余量吃干净
+  - 表现：`PIPE_PREP_FAIL stage=grow_reclaim index=72/73/77/78 errno=1`（EPERM）
+  - 修法：`finally` 里显式 `close()` 三条流 + `destroy()` 回收远程进程
+- **`ksud` 校验只看大小**：`cp` 静默失败会留下**大小完全正确、内容全 `0x00`** 的垃圾文件，执行不报错、`late-load` 返回 0、`debug info` 却连不上内核，一路「成功」到最后 `su` 不存在。改成校验 ELF 魔数 `7f454c46`，不对就用 `cat` 流重写并复查
+- **`ksud` 不跟随管理器版本**：原来「已存在且 ≥4MB 就直接用」，换了管理器还吃旧 ksud。改成按管理器 APK 里 `lib/arm64/libksud.so` 的实际大小比对，不一致就重抽
+- **Kotlin 转义写错**：正则 `Regex("\u001b\\[[0-9;]*m")` 编译成非法字符类（`Missing closing bracket`）；注入命令用的 `"
+"` 是字面反斜杠 + n，root shell 收不到回车，命令根本不执行
+- **`ShizukuRemoteProcess` 的 `waitFor` / `exitValue` 不可信**：`waitFor(300s)` 在进程已退出、文件已完整落盘时仍返回 false，`exitValue()` 抛 `IllegalThreadStateException("process hasn't exited")`。改成「读流 join 判结束」+「按文件大小轮询判写入」
+- **dirty 状态的判据**：原来用 `elapsedRealtime() >= dirtyBoot` 判「没重启」，只在「重启了」一侧成立，重启后隔几分钟再开 App 会被误判成「没重启」而一直被拦。改成比 `bootWallTime() = currentTimeMillis() - elapsedRealtime()`，容差 10 秒
+- **中断提示重复打印**：`checkPending()` 被 `onResume` 反复触发，同一笔提示打两遍
 
-### 说明
+### 实测
 
-这次改动源于一次真实踩坑：上一轮 `PIPE_PREP_FAIL` 是「干净失败」（没 panic、`KERNEL_STATE_RESTORE_PASS dirty=0`），用户没重启就再点了一次，12 分钟后 `misc_open` panic。**干净失败留下的脏东西比 panic 还阴，它不立即崩，等下一次才开始咬人。**
+改完重启一次、第二次成功：`su -c id` → `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`，`grep -i kernelsu /proc/modules` → `kernelsu 221184 1 - Live`，`/system/bin/su` 4990848 B，`getenforce` → `Enforcing`。
+
+> 诚实说明：不能断言就是 pipe 泄漏这一处修复的功劳——之前也重试过多次。但修之前连续 5 次失败（3 次 `PIPE_PREP_FAIL` + 2 次 stage0 panic），修之后 2 次内成功。另外 `ksud` 的 NUL 文件问题当时确实卡住了整个流程。
+
+### 构建 CI
+
+- 修 GitHub Actions 一直红的问题：`android-actions/setup-android@v3 → v4`（v3 会找已删除的 `tools` 包）、`actions/upload-artifact@v5 → v6`（v5 仍是 node20）、`gradlew` 补 `100755` 权限
+- `runs-on` 钉到 `ubuntu-24.04`
 
 ## [1.0.2] - 2026-10-26
 
