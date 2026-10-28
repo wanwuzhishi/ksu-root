@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.7] - 2026-10-28
+
+### 修复
+
+- **`ShizukuHelper.exec()` 泄漏 pipe**：每条 Shizuku 命令都是一对 pipe，之前只在超时那一刻 `destroyForcibly()`，正常返回的路径上流和远程进程都交给 GC——而 GC 什么时候跑不确定。这些 pipe 挂在 `shell` 用户头上，exploit 后期 `F_SETPIPE_SZ` 要占 117×128=14976 页（`pipe-user-pages-soft` 默认 16384 页），几个泄漏就足以把余量吃干净
+  - 表现：`PIPE_PREP_FAIL stage=grow_reclaim index=72/73/77/78 errno=1`（EPERM）
+  - 修法：`finally` 里显式 `close()` 三条流 + `destroy()` 回收远程进程
+
+### 实测
+
+改完重启一次、第二次成功：`su -c id` → `uid=0(root) ... context=u:r:ksu:s0`，`kernelsu 221184 1 - Live`，`/system/bin/su` 4990848 B。
+
+> 注意：不能断言是这一处修复的功劳——之前也重试过多次。但修之前连续 5 次失败（3 次 `PIPE_PREP_FAIL` + 2 次 stage0 panic），修之后 2 次内成功，方向是对的。
+
 ## [1.0.6] - 2026-10-28
 
 ### 修复

@@ -87,24 +87,43 @@ object ShizukuHelper {
      *    "process hasn't exited"，异常被吞成 "ERROR: ..." 字符串，调用方解析不出数字。
      * 所以：两个流各起线程立刻开读，只靠 join(流 EOF) 判断结束，不碰 waitFor / exitValue。
      */
-    fun exec(cmd: String, timeoutSec: Long = 20): String = try {
-        val p = newProcess(arrayOf("sh", "-c", cmd))
-        val out = java.io.ByteArrayOutputStream()
-        val err = java.io.ByteArrayOutputStream()
-        val tOut = Thread { try { p.inputStream.copyTo(out) } catch (_: Throwable) {} }
-        val tErr = Thread { try { p.errorStream.copyTo(err) } catch (_: Throwable) {} }
-        tOut.start()
-        tErr.start()
-        tOut.join(timeoutSec * 1000)
-        tErr.join(2000)
-        if (tOut.isAlive || tErr.isAlive) {
+    fun exec(cmd: String, timeoutSec: Long = 20): String {
+        var p: Process? = null
+        try {
+            p = newProcess(arrayOf("sh", "-c", cmd))
+            val proc = p
+            val out = java.io.ByteArrayOutputStream()
+            val err = java.io.ByteArrayOutputStream()
+            val tOut = Thread { try { proc.inputStream.copyTo(out) } catch (_: Throwable) {} }
+            val tErr = Thread { try { proc.errorStream.copyTo(err) } catch (_: Throwable) {} }
+            tOut.start()
+            tErr.start()
+            tOut.join(timeoutSec * 1000)
+            tErr.join(2000)
+            return (out.toString("UTF-8") + "\n" + err.toString("UTF-8")).trim()
+        } catch (e: Throwable) {
+            return "ERROR: ${e.message}"
+        } finally {
+            // 必须显式收拾：每条 Shizuku 命令都是一对 pipe，不关流、不回收远程进程，
+            // 这些 pipe 会一直挂在 shell 用户头上。exploit 后期的 F_SETPIPE_SZ 要占
+            // 14976 页，soft limit 只有 16384 页——几个泄漏就足以把余量吃干净，
+            // 表现就是 PIPE_PREP_FAIL stage=grow_reclaim errno=1 (EPERM)。
             try {
-                p.destroyForcibly()
+                p?.inputStream?.close()
+            } catch (_: Throwable) {
+            }
+            try {
+                p?.errorStream?.close()
+            } catch (_: Throwable) {
+            }
+            try {
+                p?.outputStream?.close()
+            } catch (_: Throwable) {
+            }
+            try {
+                p?.destroy()
             } catch (_: Throwable) {
             }
         }
-        (out.toString("UTF-8") + "\n" + err.toString("UTF-8")).trim()
-    } catch (e: Throwable) {
-        "ERROR: ${e.message}"
     }
 }
