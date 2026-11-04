@@ -402,18 +402,22 @@ class MainActivity : AppCompatActivity() {
 
 <b>适配设备（仅此一款）</b><br>
 REDMI K90 Max（型号 2604FRK1EC，代号 prague）<br>
-系统 OS4.0.0.14.XAACNXM（Android 17）<br>
+系统 OS4.0.0.14.XAACNXM 或 OS4.0.5.0.XAACNXM（Android 17）<br>
 内核 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k<br>
-安全补丁 2026-09-01<br><br>
+安全补丁 2026-09-01 / 2026-10-01<br><br>
 
-<b>已测试通过的组合</b><br>
+<b>已实测通过的组合</b><br>
 REDMI K90 Max / OS4.0.0.14.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k<br>
 2026-10-25 两次成功：<br>
 · 冷启动一次过，约 5 分钟，全程无重启<br>
 · 中途 panic 重启，靠「断点续跑」第二次成功<br><br>
 
-<b>其他机型或系统版本：不支持，请勿尝试。</b><br>
-本工具用的内核地址、结构体偏移全部是在上面这一版内核上实测出来的。换一个系统版本这些值就失效，写下去等于直接改坏内核内存，结果是当场 panic 或随机重启。<br><br>
+<b>OS4.0.5.0 的支持依据（未真机跑过）</b><br>
+OTA 的 boot.img 解出的内核与 4.0.0.14 是同一个二进制：git hash、ABO build id、编译时间全部相同，CVE-2026-64560 的上游修复（920f893f）不在其中。逐地址反汇编核验过 7 处硬编码——release_task 写 sighand=NULL 仍是普通 str、posix_cpu_timer_del 的两个调用点、configfs 两个 iter 入口——全部落在同一偏移。<br>
+没用真机验证过，第一次跑请先看「运行日志」开头的 <b>TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0</b> 确认识别对了。<br><br>
+
+<b>其他机型或内核版本：不支持，请勿尝试。</b><br>
+本工具用的内核地址、结构体偏移全部是在上面这一版内核上实测出来的。换一个内核这些值就失效，写下去等于直接改坏内核内存，结果是当场 panic 或随机重启。判断标准看 <b>uname -r</b> 和 ABO build id，不是看系统版本号。<br><br>
 
 <b>项目限制</b><br>
 · 临时 root：重启即失效，不写 boot 分区，不做持久化<br>

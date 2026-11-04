@@ -1,6 +1,6 @@
 # KSU Root
 
-> 在 Redmi K90 Max（代号 `prague`，OS4.0.0.14）上，从手机端一键开一个**临时 root**。
+> 在 Redmi K90 Max（代号 `prague`，OS4.0.0.14 / OS4.0.5.0）上，从手机端一键开一个**临时 root**。
 > 不需要电脑，不需要刷机，不需要解锁 Bootloader。重启即失效。
 
 **下载**：[最新 APK](https://github.com/wanwuzhishi/ksu-root/releases/latest) · 当前版本 v1.0.3
@@ -42,18 +42,22 @@
 
 ## 支持设备
 
-**只有这一台**：
+**只有这一台，两个系统版本**：
 
 ```
 机型        REDMI K90 Max (2604FRK1EC)
 代号        prague
-系统        澎湃 OS 4.0.0.14.XAACNXM
-指纹        Redmi/prague/prague:17/CP2A.260605.016/OS4.0.0.14.XAACNXM:user/release-keys
 内核        6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k
-安全补丁     2026-09-01
+系统        澎湃 OS 4.0.0.14.XAACNXM     ← 真机实测通过
+            OS4.0.5.0.XAACNXM           ← 仅离线验证，未真机跑过
+指纹        Redmi/prague/prague:17/CP2A.260605.016/OS4.0.0.14.XAACNXM:user/release-keys
+            Redmi/prague/prague:17/CP2A.260605.016/17OS4.0.261020.233332783.MTPECN.S:user/release-keys
+安全补丁     2026-09-01 / 2026-10-01
 ```
 
-其他版本**大概率不工作**，而且失败方式可能是内核 panic 而不是优雅报错。
+**为什么 4.0.5.0 也能用**：那个 OTA 没有重编内核。把 8.96 GB 的 full payload 里 `boot` 分区解出来、过 LZ4 得到的 `Image`，版本串、编译时间、ABO build id 与 4.0.0.14 完全一致，CVE-2026-64560 的上游修复（`920f893f`）不在其中。逐地址反汇编核验过 9 处硬编码偏移全部吻合。**但没在真机上跑过**——用户空间的 SELinux / tracefs / `/dev/uhid` 权限藏在 system、vendor 的 EROFS 里，离线看不到，所以第一次跑务必先看 `--preflight` 输出。
+
+判断标准看 **`uname -r` 和 ABO build id**，不是看系统版本号。内核一变，全部硬编码偏移作废，失败方式可能是内核 panic 而不是优雅报错。
 
 ---
 
@@ -251,7 +255,7 @@ v1.0.3 起 App 会在跑之前检查这个状态，检测到「上次失败且�
 - **每次重启要手动启动 Shizuku**
 - **开过 root 之后内核里有颗延迟炸弹**：`posix_cpu_timer_del` 相关的 dangling timer 节点会留在内核里，之后任意进程调 `timer_delete` 可能 panic 重启（pstore 里能看到 `posix_cpu_timer_del+0x140` 的 Oops）。重启一次清除
 - **不能用 `boot_id` 判断是否重启**：`stage0` 会改写它，跑完会变成 `d8f06902-80ff-ffff-80e2-d6dcd6ffffff` 这类假值。要用 `/proc/uptime`
-- **只支持一个系统版本**，换版本别试
+- **只支持这一版内核**（4.0.0.14 与 4.0.5.0 共用同一个内核二进制），换了内核别试
 
 ---
 

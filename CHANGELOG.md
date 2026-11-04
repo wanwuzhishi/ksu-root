@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.4] - 2026-11-04
+
+### 新增
+
+- **支持 OS4.0.5.0.XAACNXM**：`detect_standalone_profile()` 增加第二个 prague 指纹 `Redmi/prague/prague:17/CP2A.260605.016/17OS4.0.261020.233332783.MTPECN.S:user/release-keys`，日志里显示 `profile=prague-os4.0.5.0` 以区分
+
+### 说明
+
+- 新系统**没有重编内核**。把 OTA（8.96 GB full payload）里 `boot` 分区的 REPLACE_XZ 数据逐块解出、再过 LZ4 解压得到的 `Image`，版本串仍是 `6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k`，编译时间 `#1 SMP PREEMPT Mon Jul 20 18:34:35 UTC 2026`，ABO build id 相同
+- 上游 CVE-2026-64560 的修复（`920f893f`，`smp_store_release(&tsk->sighand, NULL)`）**不在其中**，`release_task` 里仍是普通 `str xzr, [x19, #0x960]`
+- 逐地址反汇编核验过 9 处硬编码偏移（`0xe65b0`、`0x1fb67c`、`0x1fb6bc`、`0x1fb6d0`、`0x4707f4`、`0x470884`、`0x53d35c`、`0x53d908`、`0xf7394`），全部吻合；`vendor_boot` 的 bootconfig 里 `rcu_nocbs=all` / `rcutree.enable_rcu_lazy=1` 也保留
+- **没有在真机上跑过 OS4.0.5.0**，只做了离线二进制比对。用户空间的 SELinux / tracefs / `/dev/uhid` 权限藏在 system、vendor 的 EROFS 里，离线验证不到，所以第一次跑请先看 `--preflight` 的输出
+- 构建可复现性已验证：用 NDK r29 的 `aarch64-linux-android35-clang` 编译未修改的源码，产物与原作者 `payload/libexploit.so` **逐字节一致**（`b0fd0edd…`，125296 B）。本版改动后 125688 B，114 个函数里 113 个代码大小完全不变，唯一变化的是 `main`（+124 B，多出的 profile 判断被内联进去），全部竞态热路径一字未动
+
 ## [1.0.3] - 2026-10-28
 
 > 本版把开发过程中的 1.0.3 ~ 1.0.7 合并发布：中间那些版本号没有对外发过，
