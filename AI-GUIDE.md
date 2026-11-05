@@ -82,10 +82,29 @@ adb -s $S shell 'grep -i kernelsu /proc/modules'
 adb -s $S shell 'ps -A -o pid,user,args 2>/dev/null | grep shizuku_server | grep -v grep'
 # 无输出 → 需要启动（见第 3 节）
 
-# 2.7 KernelSU 管理器是否安装（App 要从它里面抽 ksud）
-adb -s $S shell 'pm path me.weishu.kernelsu'
-# 空 → 让用户先安装
+# 2.7 内核管理器是否安装（App 要从它里面抽 ksud；两个都查）
+adb -s $S shell 'pm path com.sukisu.ultra; pm path me.weishu.kernelsu'
+# 两个都空 → 让用户先安装
+# SukiSU 优先（lib/arm64/libfdbqiupsrx.so 6102016 B），KernelSU 兜底（libksud.so 5172384 B）
 ```
+
+### 2.8 用哪个内核管理器（v1.0.9+）
+
+App 主界面有「管理器」一行，可切 `自动 / SukiSU Ultra / KernelSU`，存在
+`shared_prefs/ksu_root_state.xml` 的 `manager_pkg`（空串 = 自动）。
+
+```bash
+# 读当前选择
+adb -s $S shell 'run-as com.ksuroot.app cat shared_prefs/ksu_root_state.xml'
+# <string name="manager_pkg">com.sukisu.ultra</string>  已指定 SukiSU
+# <string name="manager_pkg"></string>                   自动
+```
+
+判断实际会用哪家：日志里 `管理器：已切到 X` 或状态卡片「管理器」那行的显示。
+自动模式顺序 SukiSU → KernelSU，取第一个 APK 里能读到 ksud 的。
+
+**换了管理器就要重启**：`late-load` 加载的是 ksud 自带的那份 ko，两家模块名都叫
+`kernelsu`，老模块还在内核里时新模块 insmod 报 `File exists (os error 17)`。
 
 ### 探测结论怎么写
 
@@ -229,11 +248,11 @@ done
 
 | 阶段 | 成功标志 | 失败标志 | 处理 |
 |---|---|---|---|
-| 部署载荷 | 日志 `pk64560 已就绪`、`ksud 提取成功 (5172384 bytes)` | `未找到 KernelSU 管理器` | 让用户装 KSU 管理器 |
+| 部署载荷 | 日志 `pk64560 已就绪`、`ksud 提取成功（com.sukisu.ultra，6102016 bytes）` 或 `（me.weishu.kernelsu，5172384 bytes）` | `未找到 KernelSU / SukiSU 管理器` | 让用户装 KSU 或 SukiSU 管理器 |
 | 布防 kprobe | `PROBE_OK`、日志 `window0=1 tracing_on=1` | `布防失败: window0=0` | 重试一次；仍失败则重启设备 |
 | exploit | `ROOT_CHILD_HOLD_PASS child=... uid=0` | `STAGE0_GATE_FAIL` / 进程消失 | 重跑；连续失败两次先重启 |
 | 注入 ksud | `late_rc=0`、`kernelsu ... Live` | `late_rc≠0` | 检查 `/data/local/tmp/ksu-root/ksud` 是否存在 |
-| 验证 su | `uid=0(root) ... context=u:r:ksu:s0` | `su: inaccessible or not found` | 见下方故障表 |
+| 验证 su | `uid=0(root) ... context=u:r:ksu:s0` | `su: inaccessible or not found` | 见下方「su 不可用」故障条目 |
 
 **最终验证（必须做这一步，不要只看 App 的绿字）**：
 
@@ -246,6 +265,7 @@ adb -s $S shell 'grep -i kernelsu /proc/modules'
 
 adb -s $S shell 'ls -l /system/bin/su'
 # -rwxr-xr-x 1 root root 5172384 （KernelSU su_compat 伪造的入口）
+# -rwxr-xr-x 1 root root 6102016 （SukiSU 分支，数值等于它自己的 ksud 大小）
 ```
 
 ---
@@ -282,6 +302,41 @@ adb -s $S shell 'ls -l /data/local/tmp/ksu-root/ksud'
 # 存在？ → 说明 ksud late-load 没跑成，重跑 exploit
 # 不存在？ → 让 App 重新部署载荷
 ```
+
+### 6.3.1 `su` 存在但调不通（`su: inaccessible or not found`）
+
+**这是本工具最常见的假故障，先看这条再怀疑别的。**
+
+`/system/bin/su` 明明在，`adb shell 'su -c id'` 也正常，但 App 里显示「模块已加载，但 su 不可用」，或者 App 判失败。
+
+根因是 KernelSU 的 **`shell_su_adb_only`（feature ID=6）**，默认开启。它只放行**由 adbd 或 ksu 域派生**的进程使用 `su`。App 的调用链是 App → Shizuku → `shizuku_server`，而 `shizuku_server` 由 `libshizuku.so` 经 `setsid` 启动、父进程被 init 接管（`ppid=1`），不在放行范围，于是 `su` 的 exec 被拦掉——报错是「找不到」而不是「权限不足」，很容易误判成 `su` 没生成。
+
+**为什么 adb 端验证不出来**：`adb shell` 的父进程就是 `adbd`，恰好落在放行范围内，每次都通过。只有 App 这条链会失败。**别用 adb 的 `su -c id` 成功来证明 App 也能用**（这是之前踩过的坑）。
+
+确认：
+
+```bash
+adb -s $S shell 'su -c "/data/local/tmp/ksu-root/ksud feature list" | grep -A1 shell_su'
+# [ENABLED (1)] shell_su_adb_only (ID=6)   ← 开着就会拦 App 这条链
+```
+
+修复（v1.0.7 起注入脚本会自动做，这里是手工补救）：
+
+```bash
+adb -s $S shell 'su -c "/data/local/tmp/ksu-root/ksud feature set shell_su_adb_only 0"'
+```
+
+严谨的复现方式（从 init 派生，模拟 Shizuku 的位置）：
+
+```bash
+adb -s $S shell "nohup setsid sh -c 'su -c id' > /data/local/tmp/t.txt 2>&1 &"
+sleep 3
+adb -s $S shell 'cat /data/local/tmp/t.txt'
+# feature=1 → sh: su: inaccessible or not found
+# feature=0 → uid=0(root) ... context=u:r:ksu:s0
+```
+
+**副作用（必须告知用户）**：关掉之后，任何以 shell 身份运行的进程都能用 `su`，安全性弱于 KernelSU 默认值。这是本工具能工作的前提。
 
 ### 6.4 App 显示 `Shizuku: 未运行` 但进程在
 

@@ -32,6 +32,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnExport: Button
     private lateinit var btnCopy: Button
     private lateinit var tvAbout: TextView
+    private lateinit var tvManager: TextView
+    private lateinit var rowManager: View
     private lateinit var progressBar: ProgressBar
     private lateinit var tvProgress: TextView
 
@@ -62,6 +64,8 @@ class MainActivity : AppCompatActivity() {
         btnExport = findViewById(R.id.btnExport)
         btnCopy = findViewById(R.id.btnCopy)
         tvAbout = findViewById(R.id.tvAbout)
+        tvManager = findViewById(R.id.tvManager)
+        rowManager = findViewById(R.id.rowManager)
         progressBar = findViewById(R.id.progressBar)
         tvProgress = findViewById(R.id.tvProgress)
 
@@ -71,6 +75,7 @@ class MainActivity : AppCompatActivity() {
         btnExport.setOnClickListener { doExport() }
         btnCopy.setOnClickListener { doCopy() }
         tvAbout.setOnClickListener { showAbout() }
+        rowManager.setOnClickListener { showManagerPicker() }
 
         try {
             Shizuku.addRequestPermissionResultListener(permissionListener)
@@ -177,6 +182,7 @@ class MainActivity : AppCompatActivity() {
             val st = RootController.checkStatus(this@MainActivity)
             val uptime = RootController.uptimeSec()
             val load1 = RootController.load1m()
+            refreshManagerLabel()
             tvStatus.text = buildString {
                 append("Shizuku: ").append(st.shizuku).append('\n')
                 when {
@@ -344,6 +350,133 @@ class MainActivity : AppCompatActivity() {
         appendLog("日志已复制到剪贴板（${text.length} 字符）")
     }
 
+    /**
+     * 状态卡片那行的管理器标签：显示「用户选的」和「实际会用的」。
+     * 两者不同时必须都写出来 —— 否则用户明明选了 KernelSU、实际却在用
+     * SukiSU，会以为开关没生效。
+     */
+    private suspend fun refreshManagerLabel() {
+        val infos = RootController.probeManagers(this)
+        val sel = RootController.selectedManagerPkg(this)
+        val eff = RootController.effectiveManager(infos, this)
+        tvManager.text = when {
+            infos.none { it.probed } -> "需先授权 Shizuku"
+            infos.none { it.installed } -> "都没装"
+            eff == null -> "没有可用的（APK 里读不到 ksud）"
+            sel.isEmpty() -> "自动 · ${eff.manager.label}"
+            sel == eff.manager.pkg -> eff.manager.label
+            else -> "${labelOf(sel, infos)} → 实际 ${eff.manager.label}"
+        }
+    }
+
+    private fun labelOf(pkg: String, infos: List<RootController.ManagerInfo>): String =
+        infos.firstOrNull { it.manager.pkg == pkg }?.manager?.label ?: pkg
+
+    // ---------------- 内核管理器切换 ----------------
+
+    /**
+     * 弹选择框让用户指定用哪个管理器抽 ksud。
+     *
+     * 为什么要这个开关：两个管理器同时装着很常见（换分支没卸旧的），
+     * 而 ksud 决定 late-load 加载哪一份 ko —— 选错了就是内核跑 A 家的模块、
+     * 用户态用 B 家的 ksud，uapi 对不上，管理器一直报「需要更新内核」。
+     * 自动模式按 SukiSU → KernelSU 取第一个能用的，选错了只能靠用户手动指定。
+     */
+    private fun showManagerPicker() {
+        if (running) {
+            appendLog("正在跑，别切管理器")
+            return
+        }
+        lifecycleScope.launch {
+            val infos = RootController.probeManagers(this@MainActivity)
+            val cur = RootController.selectedManagerPkg(this@MainActivity)
+            val effective = RootController.effectiveManager(infos, this@MainActivity)
+
+            // 0 = 自动；1..n = 各管理器
+            // 单选项的 View 是单行 CheckedTextView，换行符不起作用（会原样显示成
+            // 两个字符），所以标签必须压成一行；包名 / APK 路径这些长信息打到日志里。
+            val labels = ArrayList<String>()
+            labels.add(getString(R.string.manager_auto))
+            for (i in infos) {
+                val m = i.manager
+                val state = when {
+                    !i.probed -> "需先授权 Shizuku"
+                    i.apk.isEmpty() -> "未安装"
+                    !i.usable -> "读不到 ksud（${i.ksudSize} B）"
+                    else -> buildString {
+                        append(i.ksudSize).append(" B")
+                        if (i.version.isNotEmpty()) append(" · ").append(i.version)
+                    }
+                }
+                labels.add("${m.label} · $state")
+            }
+            // 详细信息走日志，不塞进选择框
+            for (i in infos) {
+                appendLog(
+                    "  ${i.manager.label}（${i.manager.pkg}）: " +
+                        when {
+                            !i.probed -> "未查（Shizuku 未就绪）"
+                            i.apk.isEmpty() -> "未安装"
+                            else -> "ksud ${i.ksudSize} B · ${i.manager.ksudLib} · ${i.apk}"
+                        }
+                )
+            }
+            val checked = if (cur.isEmpty()) 0 else {
+                val idx = infos.indexOfFirst { it.manager.pkg == cur }
+                if (idx >= 0) idx + 1 else 0
+            }
+
+            var pick = checked
+            val dlg = MaterialAlertDialogBuilder(this@MainActivity)
+                .setTitle(getString(R.string.manager_title))
+                .setSingleChoiceItems(
+                    labels.toTypedArray(), checked
+                ) { _, which -> pick = which }
+                .setPositiveButton("确定") { _, _ ->
+                    val newPkg = if (pick == 0) "" else infos[pick - 1].manager.pkg
+                    RootController.setSelectedManagerPkg(this@MainActivity, newPkg)
+                    val nowEffective = RootController.effectiveManager(
+                        infos, this@MainActivity
+                    )
+                    if (newPkg.isEmpty()) {
+                        appendLog("管理器：自动 → ${nowEffective?.manager?.label ?: "无可用"}")
+                    } else {
+                        val chosen = infos[pick - 1]
+                        if (chosen.usable) {
+                            appendLog("管理器：已切到 ${chosen.manager.label}")
+                        } else if (!chosen.probed) {
+                            appendLog("管理器：已选中 ${chosen.manager.label}（装没装还没查）")
+                        } else {
+                            // 选了个取不到 ksud 的：不拦，但要说清楚会顺延
+                            appendLog(
+                                "管理器：${chosen.manager.label} 取不到 ksud，" +
+                                    "实际会用 ${nowEffective?.manager?.label ?: "无可用"}"
+                            )
+                        }
+                    }
+                    // 换 ksud 就是换 ko，已经起过内核的话必须先重启，否则模块名
+                    // kernelsu 重名，新模块会 File exists 加载失败
+                    if (effective?.manager?.pkg != nowEffective?.manager?.pkg &&
+                        RootController.moduleLoaded(this@MainActivity)
+                    ) {
+                        appendLog("注意：内核里已有模块，换管理器必须先重启再开 root")
+                    }
+                    refresh()
+                }
+                .setNegativeButton("取消", null)
+                .create()
+            dlg.show()
+            val d = resources.displayMetrics.density
+            val bg = GradientDrawable().apply {
+                setColor(0xFF1E1E21.toInt())
+                cornerRadius = 24f * d
+                setStroke((1f * d).toInt(), 0xFF2A2A2E.toInt())
+            }
+            val inset = (24f * d).toInt()
+            dlg.window?.setBackgroundDrawable(InsetDrawable(bg, inset, inset, inset, inset))
+        }
+    }
+
     private fun showAbout() {
         riskDialog(
             getString(R.string.about_title),
@@ -412,20 +545,29 @@ REDMI K90 Max / OS4.0.0.14.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536
 · 冷启动一次过，约 5 分钟，全程无重启<br>
 · 中途 panic 重启，靠「断点续跑」第二次成功<br><br>
 
-<b>OS4.0.5.0 的支持依据（未真机跑过）</b><br>
+REDMI K90 Max / OS4.0.5.0.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k<br>
+2026-11-05 两次尝试：<br>
+· 第一次 stage0 panic 重启<br>
+· 第二次成功，su -c id 返回 uid=0 context=u:r:ksu:s0<br><br>
+
+<b>OS4.0.5.0 的支持依据（已真机验证）</b><br>
 OTA 的 boot.img 解出的内核与 4.0.0.14 是同一个二进制：git hash、ABO build id、编译时间全部相同，CVE-2026-64560 的上游修复（920f893f）不在其中。逐地址反汇编核验过 7 处硬编码——release_task 写 sighand=NULL 仍是普通 str、posix_cpu_timer_del 的两个调用点、configfs 两个 iter 入口——全部落在同一偏移。<br>
-没用真机验证过，第一次跑请先看「运行日志」开头的 <b>TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0</b> 确认识别对了。<br><br>
+2026-11-05 真机实测通过：TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0 / STAGE0_GATE_PASS slide=0x23fe600000 / ROOT_CHILD_HOLD_PASS / KSU_LOAD_PASS，su -c id 返回 uid=0 context=u:r:ksu:s0。第一次跑 panic 重启，第二次成功。运行日志开头的 <b>TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0</b> 可用于确认版本识别。<br><br>
 
 <b>其他机型或内核版本：不支持，请勿尝试。</b><br>
 本工具用的内核地址、结构体偏移全部是在上面这一版内核上实测出来的。换一个内核这些值就失效，写下去等于直接改坏内核内存，结果是当场 panic 或随机重启。判断标准看 <b>uname -r</b> 和 ABO build id，不是看系统版本号。<br><br>
 
 <b>项目限制</b><br>
 · 临时 root：重启即失效，不写 boot 分区，不做持久化<br>
-· 前提：Shizuku（或 Shevery 等兼容实现）已在运行 + KernelSU 管理器已安装<br>
+· 前提：Shizuku（或 Shevery 等兼容实现）已在运行 + KernelSU 或 SukiSU Ultra 管理器已安装<br>
 · 约 40% 概率触发内核 panic 并重启（实测 17 次里 7 次）<br>· 系统负载高时失败率更高。状态行会显示当前负载，<b>「偏高」时建议先等一等</b><br>
 · 成功后内核里会留一颗 dangling timer，之后可能随机崩溃，重启清除<br>
 · 不提供 Magisk 模块、Zygisk、隐藏、开机自启<br>
 · 仅在 prague 这一款设备上验证过<br><br>
+
+<b>支持的管理器</b><br>
+KernelSU 与 SukiSU Ultra <b>都可用</b>：ksud 在运行期从已装管理器里提取，优先 SukiSU，取不到再退回 KernelSU。两者是同源分支，late-load / feature 的 CLI 完全一致，所以脚本通用。注意 <b>ksud 与内核模块必须来自同一个管理器</b>——late-load 加载的就是 ksud 自带的那一份 ko，混用会 uapi 不匹配。<br>
+两个都装时，可以在主界面点「管理器」那行手动指定用哪一个。切换后 <b>必须先重启再开 root</b>：两家的模块名都叫 kernelsu，老模块还在内核里时新模块会加载失败。<br><br>
 
 <b>支持的 Shizuku 实现</b><br>
 官方 Shizuku 与 Shevery <b>已实测可用</b>。Shizuku-Next、yangFenTuoZi/Shizuku、ShizukuPlus 的 dropin 版与其同包名同权限名，理论可用。Nightzuku 和 ShizukuPlus 独立版把权限名改成了自己的前缀，官方 API 库请求不到，暂不兼容。<br><br>
@@ -441,6 +583,7 @@ OTA 的 boot.img 解出的内核与 4.0.0.14 是同一个二进制：git hash、
 <b>致谢</b><br>
 利用代码 <a href="https://github.com/ChaYeWuu/prague-CVE-2026-64560-OS4.0">ChaYeWuu/prague-CVE-2026-64560-OS4.0</a>（Apache-2.0）<br>
 KernelSU <a href="https://github.com/tiann/KernelSU">tiann/KernelSU</a>（GPL-3.0，运行期从已装管理器提取）<br>
+SukiSU Ultra <a href="https://github.com/SukiSU-Ultra/SukiSU-Ultra">SukiSU-Ultra/SukiSU-Ultra</a>（GPL-3.0，运行期从已装管理器提取）<br>
 Shizuku <a href="https://github.com/RikkaApps/Shizuku">RikkaApps/Shizuku</a>（Apache-2.0）<br>
 漏洞 <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-64560">CVE-2026-64560</a>（posix-cpu-timers UAF）
         """

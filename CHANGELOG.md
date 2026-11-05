@@ -1,5 +1,110 @@
 # Changelog
 
+## [1.1.0] - 2026-11-06
+
+### 修复
+
+- **干净失败被误标成「脏」**。exploit 在 stage0 之后任何一步失败都会走 `bridge_cleanup` 把内核复原，并打印 `KERNEL_STATE_RESTORE_PASS dirty=0`。但 App 只看「有没有触过内核」，照样标脏，下次点按钮就被「上次失败后没重启」拦住 —— 内核其实是干净的，白让用户重启一次。
+  现在引入 `ExploitOutcome` 三态：`GATE_REFUSED`（改写内核之前就退出，如指纹不匹配）、`CLEAN_RESTORE`（动过但已复原确认）、`TOUCHED`（状态不可知）。只有 `TOUCHED` 才标脏。
+- **失败后白等 4 分钟**。exploit 在 `PIPE_CACHE_GATE` 这类位置失败时，根本不会进 root shell，也就不可能加载 LKM，`su` 不可能凭空出现。但 `[5/5]` 照样轮询满 `SU_VERIFY_TIMEOUT_MS`。现在 `runExploit` 一并返回 `reachedRootShell`，没进 root shell 直接跳过 su 验证。
+- **`ls /system/bin/su` 的判据误命中**。文件不存在时 `ls` 的输出是 `ls: /system/bin/su: No such file or directory`，`contains("/system/bin/su")` 必然为真，于是每次都误判「su 已存在但调用被拒」，白跑一次 `ksud feature set shell_su_adb_only 0`，日志里还会打出误导性的「su 已存在但调用被拒」。改用 `[ -e /system/bin/su ] && echo SU_EXISTS || echo SU_MISSING`。
+
+### 变更
+
+- `runSteps` 的参数从 `onKernelTouch` / `onKernelClean` 两个回调合并为一个 `onOutcome`，交给调用方按三态决策，不再在流程中间靠副作用翻转布尔量。
+- `runExploit` 返回值从 `Boolean` 改为 `ExploitResult(outcome, reachedRootShell)`。
+
+## [1.0.9] - 2026-11-06
+
+### 新增
+
+- **可以手动切换内核管理器**：状态卡片下方新增「管理器」一行，点开是单选列表：
+  - **自动（SukiSU → KernelSU）** —— 默认，按顺序取第一个能用的
+  - **SukiSU Ultra（com.sukisu.ultra）** / **KernelSU（me.weishu.kernelsu）** —— 指定后优先用它
+
+  每一项都显示从该管理器 APK 里读到的 ksud 大小与版号，未安装 / 读不到 ksud 会直接标出来。选择存在 SharedPreferences 里，重启 App 和重启设备都保留。详情（ksud 路径、lib 文件名、APK 路径）打在日志里，不塞进选择框 —— 单选控件是单行的，塞不下。
+
+### 为什么需要这个开关
+
+换 `ksud` 就是换内核模块：`late-load` 加载的是 ksud 自带的那一份 ko。两个管理器同时装着很常见（换分支没卸旧的），自动模式按 SukiSU → KernelSU 取第一个能用的看起来总是对的，但用户可能就是想用 KernelSU，或者装了两个 SukiSU 系的分支包。之前只能靠卸载来改变顺序。
+
+选了取不到 ksud 的那一项**不会卡死**：只影响优先级，实际会顺延到后面可用的候选，日志会写明「XX 取不到 ksud，实际会用 YY」。
+
+### 交互细节
+
+- 探测前先判断 Shizuku 是否可用。未授权时 `pm path` 返回空，旧逻辑会把它当成「都没装」，UI 上就会莫名其妙地说两个管理器都没装 —— 现在显示「需先授权 Shizuku」，选择框里写「需先授权 Shizuku 才能查」。
+- 换管理器时如果内核里已有 `kernelsu` 模块，日志会提示「必须先重启再开 root」：两家的模块名都叫 `kernelsu`，老的还在，新的 insmod 会 `File exists (os error 17)`（实测过，vermagic 检查是通过的）。
+- 运行中不允许切换（会打断日志里「用哪个 ksud」的对应关系）。
+
+### 验证记录（2026-11-06，设备 `958DJBWGV8ONDM4P`，OS4.0.5.0）
+
+- 三个选项都正确渲染，单选状态跟着实际选择走。
+- 选 KernelSU → 写盘 `manager_pkg=me.weishu.kernelsu` → 状态行变「管理器 KernelSU」。
+- 选回自动 → 写盘 `manager_pkg=`（空串）→ 状态行变「管理器 自动 · SukiSU Ultra」。
+- **未验证**：切换后真正跑一次 root（需要重启清空内核，见 README）。
+
+## [1.0.8] - 2026-11-05
+
+### 新增
+
+- **支持 SukiSU Ultra 管理器**：ksud 候选表从单一 `me.weishu.kernelsu` 改为优先级列表，SukiSU（`com.sukisu.ultra`）在前、KernelSU 兜底。两者的 ksud 都改名伪装成 native 库放在 APK 里，文件名不同：
+
+  | 管理器 | 包名 | ksud 在 APK 内 |
+  |---|---|---|
+  | SukiSU Ultra | `com.sukisu.ultra` | `lib/arm64/libfdbqiupsrx.so`（6,102,016 B，ksud 4.3.0-r1） |
+  | KernelSU | `me.weishu.kernelsu` | `lib/arm64/libksud.so`（5,172,384 B，ksud 3.3.1） |
+
+  两者同源分支，`late-load --allow-shell`、`feature get/set/list/check/load/save`、`debug info` 的参数名与输出格式完全一致，所以 `ksu_load_setup.sh` 只改了一行注释和一行 `ksud -V` 打印，逻辑未动。
+
+### 修复
+
+- **去掉「已有够大的 ksud 就跳过提取」的短路**：用户从 KernelSU 换到 SukiSU 之后，workdir 里旧的 5 MB ksud 满足「够大」，旧逻辑直接过关，于是 `late-load` 加载的还是老分支的 ko，管理器一直报 uapi 不匹配。现在每次运行都重写一遍 ksud，保证 workdir 里的永远等于当前选中的管理器。
+
+### 验证记录（2026-11-05，设备 `958DJBWGV8ONDM4P`，OS4.0.5.0）
+
+- SukiSU 的 ko（`lkm-aarch64-android16-6.12_kernelsu.ko`，648,056 B，vermagic `6.12.76-4k`）对本机内核（`6.12.69-android16-6-...`）的 **251 个 undefined 符号全部可解析，0 缺失**。
+- 用 `sukisu-ksud boot-patch-v2` 对 4.0.5.0 的 boot.img 做离线 patch 验证（**没有刷入任何分区，产物已删**）：`Module fixups: 251, unresolved: 0`，KMI 自动识别为 `android16-6.12`，BTF v1 168480 types、Kallsyms 6.4+ 131357 symbols 全部读通。
+- 直接 `insmod` SukiSU 的 ko 报 `init_module failed without vermagic mismatch` + `File exists (os error 17)` —— **vermagic 检查通过**，唯一阻碍是模块名 `kernelsu` 与已加载的 KernelSU 模块重名。也就是说换分支时**必须先卸载旧模块或重启**，不能在已有 KernelSU 模块的内核上叠加。
+- **未验证**：完整的 App 端一键开 root 在 SukiSU 分支下的端到端流程（需要重启清空内核后跑一次，见 README 的限制说明）。
+
+## [1.0.7] - 2026-11-05
+
+> 本版把 1.0.6 和 1.0.7 合并发布。
+
+### 修复
+
+- **`su` 被 `shell_su_adb_only` 拦住，导致成功被判成失败（本版最重要）**：KernelSU 的 `shell_su_adb_only`（feature ID=6）默认开启，只放行**由 adbd 或 ksu 域派生**的进程使用 `su`。本 App 的调用链是 App → Shizuku → `shizuku_server`，而 `shizuku_server` 是用 `libshizuku.so` 经 `setsid` 起的、父进程被 init 接管（`ppid=1`），不在放行范围内，表现为 `sh: su: inaccessible or not found`——连 `/system/bin/su` 的 exec 都被拦掉（不是权限不足，是「找不到」）。
+  - 对照实验（同一台设备同一个 boot，只切 feature）：
+
+    | `shell_su_adb_only` | 进程父级 | `su -c id` |
+    |---|---|---|
+    | `1` | `ppid=1` | `sh: su: inaccessible or not found` |
+    | `0` | `ppid=1` | `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0` |
+
+  - 之前一直没发现是因为**在 adb 端验证时父进程就是 adbd**，恰好落在放行范围内，每次都对；只有 App 这条链会失败。这个假象很容易把问题误判成「`su` 还没生成」。
+  - 修复：注入脚本里执行 `ksud feature set shell_su_adb_only 0`；App 侧再加一层兜底——若 `/system/bin/su` 已存在但调用被拒，就再关一次 feature 然后重试。
+- **`[5/5] 验证 su` 只查一次就下结论**：`su` 出现在 `/system/bin/su` 之后仍可能因为上面那条 feature 而调不通，原来的实现查一次失败就直接判失败。改成轮询（最多 4 分钟、每 5 秒一次），并在 30 秒时触发上面那层兜底。
+- **失败误标脏**：上面两个问题叠加会让「实际已经 root 成功」的运行被判失败并写入 `dirty=true`，用户再点按钮就被拦下来要求重启——而重启会把好不容易拿到的 root 扔掉。本版修复后不会再出现这种误判（`v1.0.6` 引入的 `kernelTouched` 跟踪仍然生效，只保证「内核没被写过」的失败不标脏）。
+
+### 已验证
+
+- 真机（Redmi K90 Max / prague / OS4.0.5.0.XAACNXM）实测：exploit 全链跑通后 `su -c id` → `uid=0(root) ... u:r:ksu:s0`，`kernelsu 221184 1 - Live`，`/system/bin/su` 4990848 B root:root，App 状态卡片显示「root: 已开启 ✅」
+
+## [1.0.5] - 2026-11-05
+
+### 修复
+
+- **OS4.0.5.0 正式版指纹识别**：v1.0.4 按 OTA `META-INF/com/android/metadata` 的 `post-build` 加了 `17OS4.0.261020.233332783.MTPECN.S`，但**真机安装后 `ro.build.fingerprint` 报的是 `OS4.0.5.0.XAACNXM`**（metadata 里是预发布串）。结果 v1.0.4 在正式版 4.0.5.0 上会被 `TARGET_PROFILE_GATE_FAIL` 拒绝。v1.0.5 同时认两个串。
+
+### 已验证
+
+- 真机（Redmi K90 Max / prague / OS4.0.5.0.XAACNXM / 内核 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k）实测通过：`TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0`、`STAGE0_GATE_PASS slide=0x23fe600000`、`ROOT_CHILD_HOLD_PASS`、`KSU_LOAD_PASS`，最终 `su -c id` → `uid=0(root) context=u:r:ksu:s0`，`kernelsu 221184 0 - Live`
+- 第一次实跑 panic 重启（`run405.log` 15 KB 全 NUL，boot_id 变化），第二次成功——与既有约 40% panic 率一致
+
+### 载荷
+
+- `pk64560` = 125944 B，sha256 `ed1f1266c3998854d91de3179159f3c689ea19c59b6ec2febd2fd7610926e711`
+
 ## [1.0.4] - 2026-11-04
 
 ### 新增

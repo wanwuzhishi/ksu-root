@@ -3,7 +3,7 @@
 > 在 Redmi K90 Max（代号 `prague`，OS4.0.0.14 / OS4.0.5.0）上，从手机端一键开一个**临时 root**。
 > 不需要电脑，不需要刷机，不需要解锁 Bootloader。重启即失效。
 
-**下载**：[最新 APK](https://github.com/wanwuzhishi/ksu-root/releases/latest) · 当前版本 v1.0.3
+**下载**：[最新 APK](https://github.com/wanwuzhishi/ksu-root/releases/latest) · 当前版本 v1.1.0
 
 **项目介绍**：[KSU Root：给 Redmi K90 Max 开一个重启就消失的临时 root](https://blog.126330.xyz/posts/3c91e7a2/)——作者博客，把下面这些讲一遍，适合先看这个再看细节。
 
@@ -48,14 +48,17 @@
 机型        REDMI K90 Max (2604FRK1EC)
 代号        prague
 内核        6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k
-系统        澎湃 OS 4.0.0.14.XAACNXM     ← 真机实测通过
-            OS4.0.5.0.XAACNXM           ← 仅离线验证，未真机跑过
+系统        澎湃 OS 4.0.0.14.XAACNXM     ← 真机实测通过（2026-10-25）
+            OS4.0.5.0.XAACNXM           ← 真机实测通过（2026-11-05）
 指纹        Redmi/prague/prague:17/CP2A.260605.016/OS4.0.0.14.XAACNXM:user/release-keys
+            Redmi/prague/prague:17/CP2A.260605.016/OS4.0.5.0.XAACNXM:user/release-keys
             Redmi/prague/prague:17/CP2A.260605.016/17OS4.0.261020.233332783.MTPECN.S:user/release-keys
 安全补丁     2026-09-01 / 2026-10-01
 ```
 
-**为什么 4.0.5.0 也能用**：那个 OTA 没有重编内核。把 8.96 GB 的 full payload 里 `boot` 分区解出来、过 LZ4 得到的 `Image`，版本串、编译时间、ABO build id 与 4.0.0.14 完全一致，CVE-2026-64560 的上游修复（`920f893f`）不在其中。逐地址反汇编核验过 9 处硬编码偏移全部吻合。**但没在真机上跑过**——用户空间的 SELinux / tracefs / `/dev/uhid` 权限藏在 system、vendor 的 EROFS 里，离线看不到，所以第一次跑务必先看 `--preflight` 输出。
+**为什么 4.0.5.0 也能用**：那个 OTA 没有重编内核。把 8.96 GB 的 full payload 里 `boot` 分区解出来、过 LZ4 得到的 `Image`，版本串、编译时间、ABO build id 与 4.0.0.14 完全一致，CVE-2026-64560 的上游修复（`920f893f`）不在其中。逐地址反汇编核验过 9 处硬编码偏移全部吻合。**2026-11-05 已在真机（OS4.0.5.0.XAACNXM）跑通**：第一次 stage0 panic 重启，第二次成功，`su -c id` 返回 `uid=0 context=u:r:ksu:s0`。
+
+> **注意**：OTA 的 `META-INF/com/android/metadata` 里 `post-build` 写的是预发布串 `17OS4.0.261020.233332783.MTPECN.S`，真机安装后 `getprop ro.build.fingerprint` 报的却是 `OS4.0.5.0.XAACNXM`。v1.0.4 只认前者，会在正式版上被 gate 拒绝；v1.0.5 同时认两个串。
 
 判断标准看 **`uname -r` 和 ABO build id**，不是看系统版本号。内核一变，全部硬编码偏移作废，失败方式可能是内核 panic 而不是优雅报错。
 
@@ -69,9 +72,12 @@
    - 授权本 App
    - 也支持第三方实现，详见下面的「兼容的 Shizuku 实现」
 
-2. **KernelSU 管理器已安装**
-   - 从 [tiann/KernelSU](https://github.com/tiann/KernelSU/releases) 下载
+2. **内核管理器已安装：SukiSU Ultra 或 KernelSU，二选一**
+   - [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)（优先）或 [tiann/KernelSU](https://github.com/tiann/KernelSU/releases)
    - **不需要**它现在是"工作"状态，只需要装在那儿——App 会从它的 APK 里抽取 `ksud`
+   - 两个都装也行，App 按 SukiSU → KernelSU 的顺序取第一个能用的；想指定用哪个，点主界面的「管理器」那行切
+   - ⚠️ **`ksud` 和内核模块必须来自同一个管理器**：`late-load` 加载的就是 ksud 自带的那份 ko。混用会 uapi 不匹配，管理器一直报"需要更新内核"
+   - 换了管理器分支之后**必须先重启**再点按钮，否则旧模块还在内核里，新 ko 会因模块名 `kernelsu` 重名而加载失败（`File exists`）
 
 3. **设备上留着这几个文件**（如果之前手动跑过）
    - `/data/local/tmp/kernelsu-prague.ko.disabled` —— 必须改名，否则 exploit 会加载那个 uapi=2 的旧模块，管理器会报"需要更新内核"
@@ -83,9 +89,10 @@
 ### 第一次
 
 1. 启动 Shizuku（见下节），确认 App 状态行显示 `Shizuku: 已就绪`
-2. 点 **开启 root**
-3. 读一遍风险提示，点 **我已知晓风险，继续**
-4. 等 3–8 分钟。**期间不要退出 App**
+2. （可选）点 **管理器** 那行，确认要用哪个管理器。默认「自动」= SukiSU → KernelSU 取第一个能用的；两个都装时建议手动选一次，避免和内核里已加载的模块不是同一家
+3. 点 **开启 root**
+4. 读一遍风险提示，点 **我已知晓风险，继续**
+5. 等 3–8 分钟。**期间不要退出 App**
 
 成功的标志：状态行变 `root: 已开启 ✅`、`模块: kernelsu 已加载`，日志出现 `=== 成功: su 已可用 ===`。
 
@@ -224,7 +231,7 @@ lr : timerqueue_del+0x48/0x74
 >
 > 当前开源版做了两处改动：
 > 1. 自写 `ptyrun`（`app/src/main/cpp/ptyrun.c`）替代 `busybox script` —— 去掉 1.4 MB 的 GPL-2.0 二进制
-> 2. `ksud` 改为运行时从已装的 KernelSU 管理器 APK 抽取 —— 避免分发 GPL-3.0 二进制，且保证 uapi 版本匹配
+> 2. `ksud` 改为运行时从已装的 SukiSU / KernelSU 管理器 APK 抽取 —— 避免分发 GPL-3.0 二进制，且保证 uapi 版本匹配
 >
 > 两处改动的关键路径已单独验证：
 > - `ptyrun` 在真机上执行 `tty` 返回 `/dev/pts/0`，能正常向 `sh -i` 注入命令
@@ -253,6 +260,7 @@ v1.0.3 起 App 会在跑之前检查这个状态，检测到「上次失败且�
 
 - **重启即失效**，无持久化
 - **每次重启要手动启动 Shizuku**
+- **会关掉 KernelSU 的 `shell_su_adb_only`**：这条 feature 只放行 adbd / ksu 域派生的进程用 `su`，而本 App 走的是 Shizuku（`ppid=1`），不关就必然失败。关掉之后，任何以 shell 身份运行的进程都能用 `su`，安全性弱于默认值——这是本工具能工作的前提，用之前请知情
 - **开过 root 之后内核里有颗延迟炸弹**：`posix_cpu_timer_del` 相关的 dangling timer 节点会留在内核里，之后任意进程调 `timer_delete` 可能 panic 重启（pstore 里能看到 `posix_cpu_timer_del+0x140` 的 Oops）。重启一次清除
 - **不能用 `boot_id` 判断是否重启**：`stage0` 会改写它，跑完会变成 `d8f06902-80ff-ffff-80e2-d6dcd6ffffff` 这类假值。要用 `/proc/uptime`
 - **只支持这一版内核**（4.0.0.14 与 4.0.5.0 共用同一个内核二进制），换了内核别试
@@ -302,7 +310,7 @@ $NDK/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android26-clang \
 本项目 **Apache-2.0**。详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 
 - 漏洞利用代码来自 [ChaYeWuu/prague-CVE-2026-64560-OS4.0](https://github.com/ChaYeWuu/prague-CVE-2026-64560-OS4.0)（Apache-2.0）——**感谢原作者把整条利用链、偏移和失败模式都写清楚了，没有那份技术文档这个 App 不可能存在**
-- KernelSU 用户态与内核模块来自 [tiann/KernelSU](https://github.com/tiann/KernelSU)（GPL-3.0），**运行期从用户已装的 APK 中提取，不随本仓库分发**
+- KernelSU 用户态与内核模块来自 [tiann/KernelSU](https://github.com/tiann/KernelSU)（GPL-3.0），SukiSU 分支来自 [SukiSU-Ultra/SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)（GPL-3.0），**两者都在运行期从用户已装的 APK 中提取，不随本仓库分发**
 - Shizuku 来自 [RikkaApps/Shizuku](https://github.com/RikkaApps/Shizuku)（Apache-2.0）
 
 ---

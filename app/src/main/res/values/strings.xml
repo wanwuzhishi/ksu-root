@@ -8,6 +8,9 @@
     <string name="btn_check">刷新状态</string>
     <string name="btn_export">导出日志</string>
     <string name="btn_copy">复制日志</string>
+    <string name="btn_manager">管理器</string>
+    <string name="manager_title">选择内核管理器</string>
+    <string name="manager_auto">自动（SukiSU → KernelSU）</string>
     <string name="about_entry">关于</string>
     <string name="about_title">关于 KSU Root</string>
     <string name="btn_ok">知道了</string>
