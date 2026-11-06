@@ -1,5 +1,332 @@
 # Changelog
 
+## [1.1.11] - 2026-11-07
+
+### 新增：验证 su 阶段的进度弹窗
+
+exploit 跑完后 App 还要轮询 `su -c id` 最多 4 分钟（`SU_VERIFY_TIMEOUT_MS`）。
+这段之前完全没有界面反馈——只在 `waitedMs == 0L` 时打一句「su 还没就绪」，
+之后就一直静默。用户看到 `[5/5] 验证 su ...` 长时间不动，很容易误判成卡死
+或者失败。
+
+现在进入 `[5/5]` 时弹一个不可取消的对话框：
+
+- 标题「等待 root 生效」
+- 水平进度条，以 240 秒（`SU_VERIFY_TIMEOUT_MS / 1000`）为满刻度
+- 正文实时显示「已等待 N 秒（最多 240 秒）」，并说明「exploit 已经跑完，
+  这一步只是在等 KernelSU 把 su 装好，通常几秒内完成」
+
+关闭时机：日志出现 `=== ` 开头（成功/失败）、`su 就绪`、或 `不可用，请重启`；
+`doEnable` 协程收尾时再兜底 dismiss 一次。
+
+### 已验证
+- `./gradlew compileDebugKotlin` 通过。
+- 未验证：真机上弹窗的实际观感（进度条节奏、文案是否够清楚）。
+
+## [1.1.10] - 2026-11-07
+
+### 修复：drain 只看 total，slab 没 discard 也可能通过
+
+两次 panic 都发生在 `SPRAY_DONE` 之后、`BOOTID_WRITE` 之前，而 drain 的判据
+`active < limit && total < limit` 都通过了：
+
+```
+SLAB_DRAIN_PASS attempt=1 active=726 total=832 baseline=256/256 wait_ms=10454   ← panic
+SLAB_DRAIN_PASS attempt=1 active=575 total=864 baseline=256/256 wait_ms=2604    ← v1.1.7 成功
+```
+
+`total` 掉到 832 只能说明 slab 页数少了，**不能说明那些页真的被 discard 过**。
+`active=726 / total=832` 意味着 87% 的槽位还占着——这时伪造页很可能仍留在
+allocator 手里，`node->rb_right` 是 SLUB freepointer 而不是我们写的 0，reap
+走到 `rb_next` 就踩空。
+
+新增 `slab_drain_active_limit`：判据多一条 `active < 640`。prague profile 同时把
+`slab_drain_target` 从 1280 收回 1024（1280 是之前为了让 drain 别一直超时临时放宽的，
+副作用是允许了这种「total 低但 active 高」的状态通过）。
+
+代价是 drain 更容易 `RCU_NOT_DRAINED` → `ATTEMPT_DEFER` 重试，但那只是多跑一轮，
+比 panic 好。
+
+### 已验证
+- 编译通过、`--selftest` 9 用例过。
+- 未验证：完整 `--run`。
+
+## [1.1.9] - 2026-11-07
+
+### 修复：`grow_reclaim` 撞 pipe 页配额后整轮作废
+
+上一次失败停在：
+
+```
+PIPE_PAGE_STATE tag=after_release ... page_type=0xffffffff order_flags=0x4000000000000000
+PIPE_PAGE_STATE tag=grow_0..grow_7 page_type=0xf5000000 order_flags=0x4000000000000003
+PIPE_PREP_FAIL stage=grow_reclaim index=72 errno=1
+```
+
+`grow_reclaim` 是把 80 个 reclaim pipe 的 ring 从 8KB 扩到 512KB
+（`fcntl(F_SETPIPE_SZ, 0x80000)`）。第 72 个返回 EPERM(1)。
+
+**根因是 `pipe-user-pages-soft`（默认 16384 pages = 64MB，按 uid 记账）**：
+40 个 drain pipe + 已扩容的 reclaim pipe 都占着页，而 Shizuku 的
+`shizuku_server` 也是 shell uid（2000），它手上的 pipe 一起算在同一个
+user_struct 里。实测单独建 120 个 512KB pipe 能跑到 15360 pages 全部成功，
+但在 exploit 里跑到第 72 个就 EPERM —— 差的就是 shizuku 那部分。
+
+配额是动态的（对方释放就回落），所以改成**退避重试 6 次 × 300ms**，
+而不是一次失败就把整轮作废。
+
+### 已验证
+- 单独跑 120 个 `pipe2` + `F_SETPIPE_SZ(0x80000)` 在设备上全成功，
+  `total_pages=15360`，确认 16384 的软上限本身够用。
+- 未验证：带退避重试的完整 `--run`。
+
+## [1.1.8] - 2026-11-06
+
+### 修复：root 成功之后 App 没有任何反应
+
+v1.1.7 在 prague 上第一次跑通（零 panic、一次命中），`su -c id` 已经能返回
+`uid=0 context=u:r:ksu:s0`，但 App 界面一直停在 `[4/5]` 转圈，既没有
+`=== 成功 ===` 也没有提示。
+
+**原因**：`runExploit()` 的读循环只有两个退出条件——读到 `KSULOAD_END`，或
+`EXPLOIT_BUDGET_MS`（8 分钟）到期。而实际 `run.log` 停在 `--- su path check ---`
+就再没有新行，设备上 `feature list` 却已经是
+`[DISABLED] shell_su_adb_only`，说明脚本跑完了、只是 pty 不再回传后续输出
+（root child 常驻时 `ptyrun` 的转发停在这里）。于是 App 白等 8 分钟。
+
+**改动**：注入 `ksu_load_setup.sh` 时记下时刻，之后最多等 `KSU_LOAD_WAIT_MS`
+（4 分钟）没有 `KSULOAD_END` 就主动跳出循环，打一行
+`>>> 等 ksud 加载超时（240s），不再等 KSULOAD_END，直接验证 su`，继续走
+`[5/5]`。su 的判定本来就是独立做的（`su -c id`），不依赖脚本输出。
+
+### 新增：root 成功后的明确提示
+
+成功时弹对话框「root 已就绪」，说明这是临时 root、重启失效，并提供
+「打开管理器」按钮跳到当前生效的 KernelSU / SukiSU（优先用户手动选的那个）。
+之前成功后除了日志里一行 `=== 成功 ===` 之外没有任何收尾，而 KernelSU 自己
+会在加载模块后弹通知，SukiSU 不会，所以换到 SukiSU 分支后感觉「没反应」。
+
+### 已验证
+- 编译通过，`KSU_LOAD_WAIT_MS` 与成功对话框逻辑未在真机上触发验证（v1.1.7
+  的那次成功是改代码之前跑的，当时 App 确实卡在等待里）。
+
+## [1.1.7] - 2026-11-06
+
+### 修复：payload 被 panic 写坏后 App 仍然认为「已就绪」
+
+上一版（v1.1.6）点「开启 root」后 `[4/5]` 一行 exploit 输出都没有，直接跳到
+「未捕获到 ROOT_CHILD_HOLD_PASS」。手工排查发现设备上的
+`/data/local/tmp/ksu-root/pk64560` 前 64 字节全是 `00`：
+
+```
+大小 135328 B（正确）
+sha256 f3a91e45…（正确值应该是 84d46564…）
+od -An -tx1 -N16 → 00 00 00 00 …
+```
+
+**机理**：`adb push` / `writeViaStdin` 写文件后没有 fsync，数据留在 page cache。
+内核 panic 时 ext4 `data=ordered` 只保证元数据，文件大小保留但数据块变成 0。
+这和 v1.1.6 修的 `run.log` 是同一个问题——只不过这次坏的是**载荷本身**。
+
+`ensureFiles()` 之前只比文件大小，等长的全 NUL 文件会被判成「已就绪」，
+于是 `execve` 一个全 0 的 ELF 直接 `ENOEXEC`，`ptyrun` 也就一句都不输出。
+
+**改动**：`ensureFiles()` 增加 sha256 内容校验——新增 `assetSha256()` 算本地
+asset 的哈希，`statHashes()` 一次 exec 取回设备端全部 asset 的 sha256；
+就绪判据改成「大小一致 **且** 哈希一致」，重试循环里的校验也一并改掉。
+大小对但哈希不对时会打印 `大小对但内容已损坏（sha256 …），重写`。
+
+### 修复：删掉基于 loadavg 的「系统还在忙」提示
+
+原提示在 uptime < 300s 或 load1 > 8 时打印「建议等到开机 5 分钟以上、负载降到
+5 以下再试」。但这台机器的 `/proc/loadavg` 长期挂在 19-21，而 `top` 显示
+757% idle、`procs_running=1`、`/proc/pressure/cpu` 全 0——数字被不可中断睡眠
+污染，实际空闲。已多次在 load 20 左右成功跑通，这条提示每秒都在报，
+只会让人以为跑不了。现在只保留 uptime < 90s 的弱提示。
+
+### 已验证
+- `ensureFiles` 的 sha256 校验逻辑在设备上跑通：4 个 asset 全部「已就绪」。
+- `pk64560` 重新部署后 sha256 = `84d465649f58ffb9fa87154946b44d05a8799f16c26b4f83d0366fe87da962bd`，
+  `--preflight` 全绿（`SLAB_BASELINE active=256 total=256`、`PREFLIGHT_PASS`）。
+- 未验证：完整 `--run` 仍未跑通到 root（v1.1.3 的对齐修复、v1.1.5 的
+  `slab_settle_wait` + 11 个 `CROSSCACHE_TRACE` 都还没拿到完整日志）。
+
+## [1.1.6] - 2026-11-06
+
+### 修复：panic 之后 run.log 几乎全是 NUL，日志等于没有
+
+连续几次 panic 之后 `run.log` 里 **4361 / 4590 字节是 NUL**，只剩 App 自己补的
+「检测到上次运行被设备重启打断」三行。exploit 的输出全部丢掉，每次白跑一次
+都不知道崩在哪。
+
+原因：`appendLog()` 用的是 `File.appendText()`，它只 `close()`。`close()` 把数据
+交给内核 page cache 就返回，**没有 fsync**。kernel panic 时 ext4 的 `data=ordered`
+并不保证这些页已经落盘（顺序只保证先写数据再写元数据，不保证及时刷），于是文件
+大小对了、内容全是 0。
+
+修复：
+
+```kotlin
+FileOutputStream(File(filesDir, "run.log"), true).use { out ->
+    out.write((s + "\n").toByteArray())
+    out.flush()
+    out.fd.sync()
+}
+```
+
+每行一次 fsync。exploit 日志总量几百行，代价是每次多零点几毫秒，换来的是
+**panic 前最后一行一定在盘上** —— 这也是定位 1.1.5 那 11 个 `CROSSCACHE_TRACE`
+点里到底崩在哪个的前提。
+
+### 已验证
+
+- `compileDebugKotlin` 通过。
+- **尚未在真机 panic 后复验日志是否真的保住了**。
+
+## [1.1.5] - 2026-11-06
+
+### 新增：cross-cache 前等 RCU 回调泄压 + 全程分步 trace
+
+真机连续两次 panic 都落在 stage0 成功之后的 cross-cache 段（日志停在
+`CROSSCACHE_CPU_GATE` 后一句），而那一轮 `SLAB_WAIT_TICK` 的对象峰值是
+**47,712**；同一构建早前成功时只有 22,400 到 27,360。`CONFIG_RCU_LAZY=y` 下
+RCU 回调是延迟执行的，系统真正忙的时候积压会重得多。
+
+`slab_drain_target` 只判「当前计数」，管不到还排在队列里没跑的回调，所以：
+
+1. 新增 `slab_settle_wait("crosscache_entry", limit=4096, max_ms=5000)`：
+   进 cross-cache 之前读一次 `posix_timers_cache`，超过 4096 就每 100ms 再看，
+   最多等 5 秒。**不阻断**——等满就带着现状继续，只是把「明知还有几万个对象
+   在队列里就硬上」这种最坏情形避开。成功打 `SLAB_SETTLE_PASS`，超时打
+   `SLAB_SETTLE_TIMEOUT`。
+2. cross-cache 全程加了 11 条 `CROSSCACHE_TRACE step=...` 分步日志
+   （`pre_clones` / `collision_child` / `post_clones` / `memfds` /
+   `release_collision` / `stop_pre_begin` / `stop_pre_done` / `stop_post_done` /
+   `stop_spray_done` / `collision_joined` / `recover_mm_begin` / `send_payload`）。
+   stdout 本来就是 `_IONBF` 无缓冲，panic 前最后一行就是崩的位置。
+
+### 已验证
+
+- `--selftest` 9 用例全过、`--preflight` 全绿（prague，slab 256/256）。
+- **尚未跑完整 `--run`**。
+
+## [1.1.4] - 2026-11-06
+
+### 修复：SukiSU 升级后管理器页显示「读不到 ksud（-1 B）」
+
+SukiSU Ultra 从 v4.3.0-r1（versionCode 41140）升到 v4.3.0-r2（41150）之后，
+管理器选择页把 SukiSU 标成「读不到 ksud（-1 B）」，只剩 KernelSU 可用。
+
+原因：`lib/arm64/` 里那个伪装成 so 的 ksud 可执行文件**名字每次构建都可能变**：
+
+| 版本 | 文件名 | 大小 |
+|---|---|---|
+| 4.3.0-r1 (41140) | `libfdbqiupsrx.so` | 6,102,016 B |
+| 4.3.0-r2 (41150) | `libtqqfthevwb.so` | 6,102,016 B |
+
+代码里写死了 r1 的名字，升级后 `stat` 直接返回 -1。
+
+**改动**：新增 `resolveKsudLib()` —— 先试首选名，失败就扫 `lib/arm64/*.so`
+取体积 ≥ 4 MB 中最大的那个。同包里其它 native 库最大只有 248 KB
+（`libkptools.so` 248616 B、`libwbpprvmzhvn.so` 15336 B、`libadbroot.so` 9704 B），
+4 MB 这条线能干净切分，不会误选。UI 上「读不到 ksud」也拆成
+「找不到 ksud 本体」和「ksud 太小」两种文案，不再把 -1 直接抛给用户。
+
+### 已验证
+
+- 设备实测解析结果：SukiSU → `libtqqfthevwb.so` / 6,102,016 B；
+  KernelSU → `libksud.so` / 4,990,848 B，两个都对。
+- 拉下 r2 的 `libtqqfthevwb.so` 校验过确实是 ksud：ELF `ET_DYN`、
+  `INTERP=/system/bin/linker64`、含 `late-load` ×7 / `shell_su_adb_only` ×2 /
+  `/data/adb/ksu` ×46。
+- **尚未在真机上跑完整 `--run`**（v1.1.3 的 exploit 修复同样还没验证，设备电量不足）。
+
+## [1.1.3] - 2026-11-06
+
+### 修复：目标地址校验误伤了自己故意非对齐的物理页探针
+
+1.1.1 引入的 `kernel_target_valid()` 里有一条「必须 8 字节对齐」的检查。当时想的是
+挡住垃圾指针，却漏了自己代码里有一处**故意非对齐**的读写：
+
+- `DP_PHYS_PROOF_OFF = 0x6ffc`，物理页读写探针从 `scratch + 0x6ffc` 读 8 字节，
+  目的就是让访问跨页边界（页内偏移 0xffc）。
+- 这个地址末位是 `0xc`，于是被判为非法，`bridge_read_once()` 直接返回 -1。
+
+真机现象（prague / OS4.0.5.0，bridge 与 pipe 全部走绿之后才暴露）：
+
+```
+PHYS_LAYOUT_PASS memstart=0x80000000 kimage_voffset=0xffffffe1c7800000 image_phys=0x80000000
+PHYS_SETUP_FAIL step=scratch_read64 target=0xffffff80a5416ffc errno=22
+PHYS_PROBE_FAIL stage=run errno=22
+```
+
+`errno=22`（EINVAL）是上一次调用残留的，不是内核返回的——真正原因是本地被拒。
+内核的 `copy_to_iter()` / `copy_from_iter()` 本来就按字节拷贝，对非对齐地址没有要求，
+这条检查没有依据。
+
+**改动**：删掉对齐检查；`--selftest` 的 `unaligned` 用例期望值由 `0`（拒绝）改为 `1`（放行）。
+其余三条（空指针、`target+length` 溢出、低于 `DIRECT_MAP_BEGIN`）保留。
+
+### 已验证
+
+- `--selftest` 9 用例全过（prague，设备 `958DJBWGV8ONDM4P`）。
+- **该版本尚未在真机上跑完整 `--run`**（设备当时电量 6%，需要充电后重试）。
+
+### 说明
+
+`slab_drain_target` 仍为 1280，起步门禁 `SLAB_BASELINE_TOTAL_LIMIT` 仍为 1024。
+每次跑之前请确认 `/proc/slabinfo` 的 `posix_timers_cache` 是干净的 `256 256`，
+否则先重启。
+
+## [1.1.2] - 2026-11-06
+
+### 修复：脏 slab 下重跑会 panic
+
+真机实测（prague，OS4.0.5.0）暴露两条：
+
+1. **`slab_drain_target` 默认 1024 太紧**。跑过一轮后设备是 `895/1216`，
+   stage0 的 11 次 attempt 只有 2 次能过 drain，bridge stage 6 次只有 1 次。
+   每次白等 10s，而等待期间 stage0 的受控写还挂在内核里
+   （`random_table[4].data` 指着 `init_task.saved_sigmask`）。两次 panic
+   （第一轮 `attempt=7 elapsed_ms=9381`、第二轮 `attempt=2 elapsed_ms=1214`）
+   都发生在这种长时间重试的 drain 等待里。改为 **1280** 后实测
+   stage0 6/6、bridge 1/1 全部通过。
+2. **新增起步门禁 `SLAB_BASELINE_TOTAL_LIMIT = 1024`**。干净 boot 是 `256/256`，
+   跑过一轮残留到 `895/1216`。带着这种规模直接再跑，启动后 3.3KB 输出处就 panic
+   （日志全 NUL）。现在超过阈值直接打
+   `SLAB_BASELINE_DIRTY active=... total=... limit=1024 hint=reboot` 并以 13 退出，
+   不再冒险。
+
+### 加固：`PHYS_PROBE` setup 段逐步骤诊断
+
+原来 14 个 `||` 条件串在一起只报 `errno=1`（EPRNO 还是残留值），看不出哪一步失败。
+拆成独立分支，失败打 `PHYS_SETUP_FAIL step=<名字> target=... errno=...`。
+
+### 已验证
+
+- `--selftest` 9/9（prague、sheng 两台）
+- prague `--preflight` 全绿
+- prague 干净 boot 完整跑通到 `PHYS_PROBE`：`STAGE0_GATE_PASS` →
+  `MISC_BRIDGE_RW_PASS` → `PIPE_RECLAIM_PASS` → `PIPE_CANONICAL_PASS` →
+  `PHYS_LAYOUT_PASS`，其中 `BRIDGE_TARGET_INVALID` 一次未触发（新校验无误伤）。
+- **未验证**：prague 完整 `--run` 拿到 root（卡在 `PHYS_PROBE stage=setup`）。
+
+## [1.1.1] - 2026-11-06
+
+### 加固
+
+- **bridge 读写加目标地址校验**（对照 GhostLock 的 `attack::in_direct_map()`）。exploit 建好 misc bridge 之后，每一次内核读写都走 `bridge_read_once` / `bridge_write_once`，而目标地址来自别处：链表指针、页描述符、伪造的 `rb_node` 父/子、profile 里的符号偏移。任何一处算错或读到脏数据，`pread`/`pwrite` 过去就是一次内核态 page fault，而本机 `CONFIG_PANIC_ON_OOPS=y` 会立刻重启，日志都来不及落盘。
+  现在两个入口都先过 `kernel_target_valid()`：拒绝空指针、非 8 字节对齐、长度溢出，以及落在 `0xffffff8000000000`（direct map 起点）以下的目标。被拒时 `bridge_*` 返回 -1，退回各自原有的失败分支；首次拒绝打一条 `BRIDGE_TARGET_INVALID target=... length=...`。
+  这是**必要非充分**条件：目标落在内核空间内、但偏移算错（用错机型 profile、少算 8 字节）的情况它发现不了——那需要知道每个目标符号的期望区间，做不到通用。
+- **新增 `--selftest`**：只跑 `kernel_target_valid()` 的 9 个边界用例，不碰内核、不需要指纹匹配，任何设备上都能跑，输出 `TARGET_VALID_SELFTEST_PASS cases=9`。这层防线写反了比不加更危险，所以要能单独验。
+
+### 已验证
+
+- 编译零警告（`-Wall -Wextra -Werror`），产物 133,128 B / sha256 `e5b776956281e877b23c238622b3cd4616d243014d2ac99b84b1597efa4a13f2`。
+- `--selftest` 在 Xiaomi Pad 6S Pro（Android 16 / 5.15.194）上跑通：`TARGET_VALID_SELFTEST_PASS cases=9`。
+- 静态核对全部 78 个 bridge 调用点的目标表达式，均为 direct map / image / vmemmap 地址，不会误拒。
+- **未验证**：prague 上的完整 `--run`。校验只加在 IO 入口、不改任何逻辑分支，理论上不影响原有成功路径，但仍需真机回归一次。
+
 ## [1.1.0] - 2026-11-06
 
 ### 修复

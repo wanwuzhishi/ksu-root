@@ -38,8 +38,11 @@ object RootController {
      * 所以同一套脚本不用改。但**各自的内核模块不同**：换 ksud 等于换 ko，
      * 因为 late-load 加载的就是 ksud 自带的那一份。
      *
-     * ksudLib 是管理器 APK 里那个改名伪装的 native 可执行文件（带
-     * ELF INTERP=/system/bin/linker64），两家都没叫 ksud。
+     * ksudLib 是**首选文件名**，不是唯一可能的名：管理器 APK 里那个改名伪装的
+     * native 可执行文件（带 ELF INTERP=/system/bin/linker64）名字会变。
+     * SukiSU 4.3.0-r1 是 libfdbqiupsrx.so，r2（versionCode 41150）变成
+     * libtqqfthevwb.so，字节数一模一样（6102016）。写死就会「读不到 ksud」。
+     * 所以真正取值走 [resolveKsudLib]：先试首选名，再扫目录兜底。
      */
     data class KsuManager(val pkg: String, val ksudLib: String, val label: String)
 
@@ -61,11 +64,17 @@ object RootController {
         val ksudSize: Long,
         val version: String,
         val probed: Boolean,
+        /** 实际在 APK 里找到的 lib 文件名；找不到为空串 */
+        val ksudLib: String = "",
     ) {
         val installed: Boolean get() = probed && apk.isNotEmpty()
         val usable: Boolean get() = installed && ksudSize >= KSUD_MIN_BYTES
     }
     private const val EXPLOIT_BUDGET_MS = 8 * 60_000L
+    // 注入 ksud late-load 之后等 KSULOAD_END 的上限。实测 root child 常驻时 pty 可能
+    // 不再回传后续输出（run.log 停在 "--- su path check ---"，而设备上 feature 已经
+    // DISABLE 了），死等 EXPLOIT_BUDGET_MS（8 分钟）会让用户以为 App 卡死。
+    private const val KSU_LOAD_WAIT_MS = 240_000L
     // KernelSU 在 late-load 之后才 install 出 /system/bin/su，实测要两三分钟。
     // 只查一次会把成功判成失败（线上真踩到过，还顺手标了脏导致用户被迫重启）。
     private const val SU_VERIFY_TIMEOUT_MS = 4 * 60_000L
@@ -232,12 +241,13 @@ object RootController {
                 continue
             }
             val baseDir = apk.removeSuffix("/base.apk")
-            val ksudSize = sizeOf("$baseDir/lib/arm64/${m.ksudLib}")
+            val lib = resolveKsudLib(baseDir, m.ksudLib)
+            val ksudSize = if (lib.isEmpty()) -1L else sizeOf("$baseDir/lib/arm64/$lib")
             // versionName 用 dumpsys 取，pm 在这代系统上不一定给
             val ver = ShizukuHelper.exec(
                 "dumpsys package ${m.pkg} 2>/dev/null | grep -m1 versionName | tr -d ' '"
             ).trim().removePrefix("versionName=")
-            out.add(ManagerInfo(m, apk, ksudSize, ver, probed = true))
+            out.add(ManagerInfo(m, apk, ksudSize, ver, probed = true, ksudLib = lib))
         }
         out
     }
@@ -372,16 +382,15 @@ object RootController {
         }
         log("  OK")
 
-        // stage0 依赖几个线程的精确竞争时序。系统负载高的时候调度抖动大，
-        // 竞争窗口错位，rb_erase 就会拿一棵对不上的红黑树去改，直接 panic。
-        // 实测过三次 panic 都发生在开机后 90-100 秒、load average 20+ 的时候。
-        // 这里只提醒，不拦截 —— 用户可能就是想试。
+        // 2026-11-06：删掉 loadavg 判据。这台机器的 /proc/loadavg 长期挂在 19-21，
+        // 但 top 显示 757% idle、procs_running=1、/proc/pressure/cpu 全 0 —— 数字被
+        // 不可中断睡眠污染，实际是空闲的。用户多次在 load 20 左右成功跑通，之前那条
+        // 「等到负载降到 5 以下」的提示纯属误导（每秒都在报，还让人以为不能跑）。
+        // 只留 uptime 作为「刚开机、系统服务还在初始化」的弱提示。
         val uptime = ShizukuHelper.exec("cut -d. -f1 /proc/uptime").trim().toIntOrNull() ?: 0
-        val load1 = ShizukuHelper.exec("cut -d' ' -f1 /proc/loadavg").trim().toFloatOrNull() ?: 0f
-        if (uptime < 300 || load1 > 8f) {
-            log("  注意：设备启动 ${uptime}s、1 分钟负载 ${load1}，系统还在忙。")
-            log("  此时跑失败率高（stage0 竞争窗口会被调度抖动打偏，失败就是 panic）。")
-            log("  建议等到开机 5 分钟以上、负载降到 5 以下再试。")
+        if (uptime < 90) {
+            log("  注意：设备启动才 ${uptime}s，系统服务还在初始化。")
+            log("  这次如果失败，等两分钟再试。")
         }
 
         step("[2/5] 部署载荷到 $WORK_DIR ...")
@@ -468,10 +477,32 @@ object RootController {
         ShizukuHelper.exec("reboot", 10)
     }
 
+    private fun assetSha256(bytes: ByteArray): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        return md.digest(bytes).joinToString("") { "%02x".format(it) }
+    }
+
+    /** 一次 exec 取回全部 asset 的设备端 sha256，供 ensureFiles 做内容校验。 */
+    private fun statHashes(): Map<String, String> {
+        val out = ShizukuHelper.exec(
+            ASSETS.joinToString("; ") { n -> "sha256sum \"$WORK_DIR/$n\" 2>/dev/null" }
+        )
+        val map = HashMap<String, String>()
+        for (line in out.lines()) {
+            val parts = line.trim().split(Regex("\\s+"))
+            if (parts.size >= 2) {
+                val name = parts[1].substringAfterLast('/')
+                if (name in ASSETS && parts[0].length == 64) map[name] = parts[0].lowercase()
+            }
+        }
+        return map
+    }
+
     private fun ensureFiles(ctx: Context, log: (String) -> Unit): Boolean {
         ShizukuHelper.exec("mkdir -p $WORK_DIR && chmod 777 $WORK_DIR")
         // 一次命令取回全部大小：每多一次 exec 就多一次 Shizuku 远程流可能返回空的概率
         val sizes = statSizes()
+        val hashes = statHashes()
         for (name in ASSETS) {
             val target = "$WORK_DIR/$name"
             val bytes = try {
@@ -481,23 +512,31 @@ object RootController {
                 return false
             }
             val want = bytes.size.toLong()
-            // 只看文件大小：之前遇到过 writeViaStdin 写出一份等长的全 NUL 文件，
-            // 光靠 test -f 会把它当成已就绪，导致后面脚本一句输出都没有。
+            val wantHash = assetSha256(bytes)
             val onDevice = sizes[name] ?: -1L
-            if (onDevice == want) {
+            // 2026-11-06：内核 panic 会把已经部署好的 payload 变成「等长全 NUL」——
+            // 文件大小一点不差，只有内容变成 0。之前只比大小，于是把这种文件当成
+            // 已就绪，pk64560 执行后一句输出都没有（execve 直接 ENOEXEC），白跑一整轮。
+            // 所以必须比 sha256。
+            if (onDevice == want && hashes[name] == wantHash) {
                 log("  $name 已就绪 ($want bytes)")
                 continue
             }
-            log("  写入 $name ($want bytes, 设备上是 ${if (onDevice < 0) "无" else "$onDevice bytes"}) ...")
+            if (onDevice == want && hashes[name] != wantHash) {
+                log("  $name 大小对但内容已损坏（sha256 ${hashes[name] ?: "读不到"}），重写")
+            } else {
+                log("  写入 $name ($want bytes, 设备上是 ${if (onDevice < 0) "无" else "$onDevice bytes"}) ...")
+            }
             var ok = false
             for (attempt in 1..3) {
                 if (writeViaStdin(target, bytes)) {
                     val got = sizeOf(target)
-                    if (got == want) {
+                    val gotHash = statHashes()[name]
+                    if (got == want && gotHash == wantHash) {
                         ok = true
                         break
                     }
-                    log("    第 $attempt 次大小不符 ($got / $want)，重试")
+                    log("    第 $attempt 次校验不符（$got / $want bytes, sha256 ${gotHash ?: "读不到"}），重试")
                 } else {
                     log("    第 $attempt 次写入失败，重试")
                 }
@@ -525,6 +564,26 @@ object RootController {
      * （很容易发生，用户换了分支但没卸载旧的），而我们已经从胜出者的 ko
      * 起了内核，混用会让 uapi 对不上。
      */
+    /**
+     * 找出管理器 APK 里真正的 ksud 文件名。
+     *
+     * 名字不可信：SukiSU 每次构建都会给这个伪装成 .so 的可执行文件换随机名，
+     * 4.3.0-r1 叫 libfdbqiupsrx.so、r2 叫 libtqqfthevwb.so，大小都是 6102016 B。
+     * 早先把它写死，管理器一升级就显示「读不到 ksud（-1 B）」。
+     *
+     * 兜底判据是体积：同一个包里其它 native 库最大也就 250 KB
+     * （libkptools.so 248616、libwbpprvmzhvn.so 15336、libadbroot.so 9704），
+     * ksud 本体则是 4.9~6.1 MB，用 KSUD_MIN_BYTES 就能干净切分。
+     */
+    private fun resolveKsudLib(baseDir: String, preferred: String): String {
+        if (sizeOf("$baseDir/lib/arm64/$preferred") >= KSUD_MIN_BYTES) return preferred
+        val cmd = "for f in $baseDir/lib/arm64/*.so; do " +
+            "s=\$(stat -c %s \"\$f\" 2>/dev/null || echo 0); " +
+            "if [ \"\$s\" -ge $KSUD_MIN_BYTES ]; then echo \"\$s \$(basename \"\$f\")\"; fi; " +
+            "done | sort -nr | head -1 | cut -d' ' -f2-"
+        return ShizukuHelper.exec(cmd).trim().lines().lastOrNull()?.trim().orEmpty()
+    }
+
     private fun ensureKsud(ctx: Context, log: (String) -> Unit): Boolean {
         val paths = ArrayList<Pair<KsuManager, String>>()
         for (m in orderedCandidates(ctx)) {
@@ -542,10 +601,15 @@ object RootController {
         var lastErr = ""
         for ((m, apk) in paths) {
             val baseDir = apk.removeSuffix("/base.apk")
-            val src = "$baseDir/lib/arm64/${m.ksudLib}"
+            val lib = resolveKsudLib(baseDir, m.ksudLib)
+            if (lib.isEmpty()) {
+                lastErr = "在 ${m.pkg} 的 lib/arm64 里找不到 ksud 本体（≥ $KSUD_MIN_BYTES 字节的 .so）"
+                continue
+            }
+            val src = "$baseDir/lib/arm64/$lib"
             val srcSize = sizeOf(src)
             if (srcSize < KSUD_MIN_BYTES) {
-                lastErr = "读不到管理器内的 ${m.ksudLib}（$srcSize bytes @ $src）"
+                lastErr = "读不到管理器内的 $lib（$srcSize bytes @ $src）"
                 continue
             }
             if (extractKsud(m, src, srcSize, log)) return true
@@ -665,6 +729,7 @@ object RootController {
         val reader = p.inputStream.bufferedReader()
         val writer = p.outputStream
         var injected = false
+        var injectedAt = 0L
         val ansi = Regex("\u001b\\[[0-9;]*m")
         val deadline = System.currentTimeMillis() + EXPLOIT_BUDGET_MS
         var fatalGate = false
@@ -692,6 +757,7 @@ object RootController {
 
                 if (!injected && line.contains("ROOT_CHILD_HOLD_PASS")) {
                     injected = true
+                    injectedAt = System.currentTimeMillis()
                     Thread.sleep(1000)
                     writer.write("sh $WORK_DIR/ksu_load_setup.sh\n".toByteArray())
                     writer.flush()
@@ -701,6 +767,10 @@ object RootController {
                     log(">>> 已向 root shell 注入 ksud late-load 命令")
                 }
                 if (line.contains("KSULOAD_END")) break
+                if (injected && System.currentTimeMillis() - injectedAt > KSU_LOAD_WAIT_MS) {
+                    log(">>> 等 ksud 加载超时（${KSU_LOAD_WAIT_MS / 1000}s），不再等 KSULOAD_END，直接验证 su")
+                    break
+                }
             }
             p.waitFor(15, TimeUnit.SECONDS)
         } catch (e: Throwable) {

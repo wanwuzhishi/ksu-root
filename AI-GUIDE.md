@@ -352,6 +352,25 @@ App 缓存了旧状态。`am force-stop` + `am start` 即可。
 
 ---
 
+### 6.6 日志出现 `BRIDGE_TARGET_INVALID`
+
+v1.1.1 起 bridge 读写加了一层目标地址校验。看到这条说明某处算出来的地址**根本不是内核虚拟地址**（小于 `0xffffff8000000000`、非 8 字节对齐、或长度溢出）。典型来源：
+
+- 链表指针读到脏数据（stage0 写完后 `misc_list` 的 `next`/`prev` 不合理）
+- 页描述符地址算错（`memstart_addr` / `kimage_voffset` 读错，vmemmap 推导偏了）
+- profile 常量与当前内核不匹配
+
+**它替你挡掉了一次 panic**：不校验的话 `pwrite` 直接打到非法地址，`CONFIG_PANIC_ON_OOPS=y` 立刻重启。
+
+这条日志**每次运行只打一次**（首次拒绝），后续拒绝静默。要判断是不是它导致失败，看紧随其后的 `*_FAIL` 日志（`MISC_BRIDGE_RESTORE_FAIL`、`PIPE_CACHE_GATE` 等）。
+
+验一下校验逻辑本身：
+
+```bash
+adb -s $S shell '/data/local/tmp/ksu-root/pk64560 --selftest'
+# TARGET_VALID_SELFTEST_PASS cases=9
+```
+
 ## 7. 用户可能会问的问题
 
 | 问题 | 回答要点 |

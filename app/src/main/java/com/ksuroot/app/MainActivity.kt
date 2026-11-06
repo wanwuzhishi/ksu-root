@@ -1,15 +1,19 @@
 package com.ksuroot.app
 
+import androidx.appcompat.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.Html
 import android.text.method.LinkMovementMethod
 import android.view.View
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
@@ -18,6 +22,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
 import rikka.shizuku.Shizuku
 
@@ -137,11 +142,24 @@ class MainActivity : AppCompatActivity() {
             tvLog.text = logBuf.toString()
             scrollLog.post { scrollLog.fullScroll(ScrollView.FOCUS_DOWN) }
             updateProgress(s)
+            // exploit 跑完后 App 还要轮询 su 最多 4 分钟，这段没有反馈会让人以为卡死
+            if (s.startsWith("[5/5]")) showSuVerifyDialog()
+            if (s.startsWith("=== ") || s.contains("su 就绪") || s.contains("不可用，请重启")) {
+                dismissSuVerifyDialog()
+            }
         }
-        // 同步落盘：exploit 跑飞时内核直接 panic，进程来不及做任何收尾，
+        // 同步落盘 + fsync：exploit 跑飞时内核直接 panic，进程来不及做任何收尾，
         // 日志只在内存里等于没有。写到 App 私有目录，重启后还能 cat 出来。
+        //
+        // 必须显式 fsync —— File.appendText() 只 close()，数据进的是 page cache，
+        // kernel panic 时 ext4 的 data=ordered 不保证它落盘。2026-11-06 连续三次
+        // panic 后 run.log 里 4361/4590 字节是 NUL，最后一行永远看不到，等于白跑。
         try {
-            File(filesDir, "run.log").appendText(s + "\n")
+            FileOutputStream(File(filesDir, "run.log"), true).use { out ->
+                out.write((s + "\n").toByteArray())
+                out.flush()
+                out.fd.sync()
+            }
         } catch (_: Throwable) {
         }
     }
@@ -297,7 +315,9 @@ class MainActivity : AppCompatActivity() {
                 appendLog("异常: ${e.message}")
                 false
             }
+            dismissSuVerifyDialog()
             appendLog(if (ok) "=== 成功：su 已可用 ===" else "=== 失败（看上面日志）===")
+            if (ok) showSuccessDialog()
             btnEnable.isEnabled = true
             btnCheck.isEnabled = true
             btnExport.isEnabled = true
@@ -310,6 +330,117 @@ class MainActivity : AppCompatActivity() {
             }, 1500)
             refresh()
         }
+    }
+
+    // ---- 验证 su 的进度弹窗（2026-11-07）----
+    // exploit 跑完后 App 要轮询 `su -c id` 最多 4 分钟。这段之前完全没有界面反馈，
+    // 看到「[5/5] 验证 su ...」之后长时间不动，很容易误判成卡死或失败。
+    // 进入 [5/5] 时弹一个不可取消的对话框，用 240 秒为满刻度的进度条显示等待进度。
+    private var suDialog: AlertDialog? = null
+    private var suDialogBar: ProgressBar? = null
+    private var suDialogText: TextView? = null
+    private var suDialogStart = 0L
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val suTicker = object : Runnable {
+        override fun run() {
+            val text = suDialogText ?: return
+            val bar = suDialogBar ?: return
+            val secs = ((System.currentTimeMillis() - suDialogStart) / 1000L).toInt()
+            bar.progress = secs.coerceAtMost(240)
+            text.text = "已等待 $secs 秒（最多 240 秒）\n\n" +
+                "exploit 已经跑完，这一步只是在等 KernelSU 把 su 装好，通常几秒内完成。"
+            if (suDialog?.isShowing == true) uiHandler.postDelayed(this, 500L)
+        }
+    }
+
+    private fun showSuVerifyDialog() {
+        if (suDialog?.isShowing == true) return
+        suDialogStart = System.currentTimeMillis()
+        val pad = (24 * resources.displayMetrics.density).toInt()
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 240
+            progress = 0
+        }
+        val text = TextView(this).apply {
+            setPadding(0, pad / 2, 0, 0)
+            textSize = 13f
+            text = "正在验证 su 权限…"
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, 0)
+            addView(
+                bar,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(text)
+        }
+        suDialogBar = bar
+        suDialogText = text
+        suDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("等待 root 生效")
+            .setView(box)
+            .setCancelable(false)
+            .show()
+        uiHandler.post(suTicker)
+    }
+
+    private fun dismissSuVerifyDialog() {
+        uiHandler.removeCallbacks(suTicker)
+        suDialog?.dismiss()
+        suDialog = null
+        suDialogBar = null
+        suDialogText = null
+    }
+
+    /** root 成功后给一个明确的收尾：临时 root 重启即失效，并可直接跳去管理器。 */
+    private fun showSuccessDialog() {
+        val pkg = currentManagerPkg()
+        val msg = buildString {
+            append("su 已经可以使用。\n\n")
+            append("这是临时 root：KernelSU 模块是 late-load 进去的，重启后失效，重启需要再跑一次。\n\n")
+            if (pkg == null) {
+                append("没找到已安装的 KernelSU / SukiSU 管理器。")
+            } else {
+                append("可以在管理器里查看模块授权和 su 规则。")
+            }
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("root 已就绪")
+            .setMessage(msg)
+            .setPositiveButton(if (pkg == null) "好" else "打开管理器") { _, _ ->
+                if (pkg != null) {
+                    val intent = packageManager.getLaunchIntentForPackage(pkg)
+                    if (intent == null) {
+                        appendLog("  打开 $pkg 失败（没有启动入口）")
+                    } else {
+                        try {
+                            startActivity(intent)
+                        } catch (e: Throwable) {
+                            appendLog("  打开 $pkg 失败: ${e.message}")
+                        }
+                    }
+                }
+            }
+            .setNegativeButton(if (pkg == null) null else "稍后", null)
+            .show()
+    }
+
+    /** 当前生效的管理器：优先用户手动选的，其次按 SukiSU → KernelSU 顺序找已装的。 */
+    private fun currentManagerPkg(): String? {
+        val sel = RootController.selectedManagerPkg(this)
+        val candidates = if (sel.isNotEmpty()) {
+            listOf(sel) + RootController.KSU_MANAGERS.map { it.pkg }.filter { it != sel }
+        } else {
+            RootController.KSU_MANAGERS.map { it.pkg }
+        }
+        for (p in candidates) {
+            if (packageManager.getLaunchIntentForPackage(p) != null) return p
+        }
+        return null
     }
 
     private fun startDisable() {
@@ -402,7 +533,7 @@ class MainActivity : AppCompatActivity() {
                 val state = when {
                     !i.probed -> "需先授权 Shizuku"
                     i.apk.isEmpty() -> "未安装"
-                    !i.usable -> "读不到 ksud（${i.ksudSize} B）"
+                    !i.usable -> if (i.ksudLib.isEmpty()) "找不到 ksud 本体" else "ksud 太小（${i.ksudSize} B）"
                     else -> buildString {
                         append(i.ksudSize).append(" B")
                         if (i.version.isNotEmpty()) append(" · ").append(i.version)
@@ -417,7 +548,7 @@ class MainActivity : AppCompatActivity() {
                         when {
                             !i.probed -> "未查（Shizuku 未就绪）"
                             i.apk.isEmpty() -> "未安装"
-                            else -> "ksud ${i.ksudSize} B · ${i.manager.ksudLib} · ${i.apk}"
+                            else -> "ksud ${i.ksudSize} B · ${i.ksudLib} · ${i.version} · ${i.apk}"
                         }
                 )
             }
