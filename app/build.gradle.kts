@@ -11,8 +11,8 @@ android {
         applicationId = "com.ksuroot.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "1.1.11"
+        versionCode = 41
+        versionName = "1.2.9"
     }
 
     buildTypes {

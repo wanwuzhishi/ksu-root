@@ -27,7 +27,8 @@ import java.util.concurrent.TimeUnit
 object RootController {
 
     const val WORK_DIR = "/data/local/tmp/ksu-root"
-    private val ASSETS = listOf("pk64560", "ptyrun", "kp_arm.sh", "ksu_load_setup.sh")
+    private val ASSETS =
+        listOf("pk64560", "ptyrun", "kp_arm.sh", "ksu_load_setup.sh", "sukisu-prague.ko")
     private const val KSUD_MIN_BYTES = 4_000_000L
 
     /**
@@ -75,6 +76,8 @@ object RootController {
     // 不再回传后续输出（run.log 停在 "--- su path check ---"，而设备上 feature 已经
     // DISABLE 了），死等 EXPLOIT_BUDGET_MS（8 分钟）会让用户以为 App 卡死。
     private const val KSU_LOAD_WAIT_MS = 240_000L
+    /** 读泵线程在流结束（或异常）时投递的哨兵，用来把「流关了」和「暂时没数据」分开。 */
+    private const val EOF_MARKER = "\u0000__EAC_EOF__\u0000"
     // KernelSU 在 late-load 之后才 install 出 /system/bin/su，实测要两三分钟。
     // 只查一次会把成功判成失败（线上真踩到过，还顺手标了脏导致用户被迫重启）。
     private const val SU_VERIFY_TIMEOUT_MS = 4 * 60_000L
@@ -395,24 +398,30 @@ object RootController {
 
         step("[2/5] 部署载荷到 $WORK_DIR ...")
         if (!ensureFiles(ctx, log)) return false
-        // 上游仓库自带的 kernelsu-prague.ko 是 uapi=2 的旧模块。exploit 内部硬编码了
-        // KSU_MODULE_PATH 指向它，一旦加载成功，管理器会报「需要更新内核」且 su 拿不到。
-        // 没法改 exploit 参数，只能让这个路径读不到。
-        val legacy = ShizukuHelper.exec("ls /data/local/tmp/kernelsu-prague.ko 2>/dev/null").trim()
-        if (legacy.isNotEmpty()) {
-            ShizukuHelper.exec("mv /data/local/tmp/kernelsu-prague.ko /data/local/tmp/kernelsu-prague.ko.disabled")
-            log("  已把旧 kernelsu-prague.ko 改名为 .disabled（uapi=2，会顶掉新版模块）")
+        // CVE-2026-98260 版本的 exploit 自己 finit_module 加载 LKM，路径由 KSU_MODULE 指定
+        // （缺省 /data/local/tmp/kernelsu-prague.ko）。这里把随包的 SukiSU ko（uapi=6,
+        // 646392 B）放到那个位置。上游仓库自带的 kernelsu-prague.ko 是 uapi=2 的旧模块，
+        // 一旦被加载管理器会报「需要更新内核」，所以按 sha256 判断后替换。
+        val wantKo = ShizukuHelper.exec("sha256sum $WORK_DIR/sukisu-prague.ko 2>/dev/null | cut -d' ' -f1").trim()
+        val curKo = ShizukuHelper.exec("sha256sum /data/local/tmp/kernelsu-prague.ko 2>/dev/null | cut -d' ' -f1").trim()
+        if (wantKo.isNotEmpty() && curKo == wantKo) {
+            log("  /data/local/tmp/kernelsu-prague.ko 已是最新")
+        } else {
+            if (curKo.isNotEmpty()) {
+                ShizukuHelper.exec("mv /data/local/tmp/kernelsu-prague.ko /data/local/tmp/kernelsu-prague.ko.old")
+                log("  旧 /data/local/tmp/kernelsu-prague.ko 已备份为 .old")
+            }
+            ShizukuHelper.exec("cp $WORK_DIR/sukisu-prague.ko /data/local/tmp/kernelsu-prague.ko && chmod 644 /data/local/tmp/kernelsu-prague.ko")
+            log("  已部署 SukiSU LKM 到 /data/local/tmp/kernelsu-prague.ko")
         }
 
-        step("[3/5] 布防 kprobe ...")
-        log(ShizukuHelper.exec("sh $WORK_DIR/kp_arm.sh", 40))
-        val armed = ShizukuHelper.exec("grep -c window0 /sys/kernel/tracing/kprobe_events").trim()
-        val tracing = ShizukuHelper.exec("cat /sys/kernel/tracing/tracing_on").trim()
-        if (armed != "1" || tracing != "1") {
-            log("  布防失败: window0=$armed tracing_on=$tracing")
-            return false
-        }
-        log("  布防成功 window0=1 tracing_on=1")
+        step("[3/5] 检查内核环境 ...")
+        // CVE-2026-98260 的窗口由父进程 wait4 决定（B 变僵尸后不回收，节点就一直挂着），
+        // 不再是纳秒级相位竞争，所以完全不需要 kprobe 扰动。这里只是确认一下没有残留模块，
+        // 顺便保留 kp_arm.sh 供旧版本回退时使用 —— 布防失败不再阻断流程。
+        val loaded = ShizukuHelper.exec("grep -ci kernelsu /proc/modules 2>/dev/null").trim()
+        log("  已加载 kernelsu 模块数: ${loaded.ifEmpty { "0" }}（98260 不需要 kprobe）")
+        log("  READY")
 
         step("[4/5] 运行 exploit（约 2-5 分钟，期间可能重启）...")
         val res = runExploit(log)
@@ -716,8 +725,28 @@ object RootController {
      * exploit 最后 execl("/system/bin/sh", "sh", "-i")，没有 tty 时 sh 会立刻退出，
      * 命令就被外层 shell 抢走，root shell 白起。
      */
+    /** 探一次 su 是否真的可用。root child 起来后 su 通常几秒内就绪，
+     *  不需要等到 pty 关闭或脚本跑完那 120 秒的等待循环。 */
+    private fun suWorks(): Boolean = try {
+        ShizukuHelper.exec("/system/bin/su -c id 2>/dev/null", 8).contains("uid=0")
+    } catch (_: Throwable) {
+        false
+    }
+
     private fun runExploit(log: (String) -> Unit): ExploitResult {
-        val shellCmd = "cd $WORK_DIR && ./ptyrun ./pk64560 --run 2>&1"
+        // KSU_MODULE 指向随包的 SukiSU ko；KSU_LABEL 只影响 payload 结尾那句提示文案。
+        // 不设 PRAGUE_NO_SHELL：要保留 interactive root child，App 才能进去执行
+        // ksu_load_setup.sh（关 shell_su_adb_only + 等 su）。
+        // 只支持 prague（6.12.69）。平板 sheng 走 98260 那条路线在 5.15 上不成立
+        // （exec_mmap 用的是不可中断的 mmap_read_lock，造不出预期失败），已从本仓库移除。
+        //
+        // KSU_MODULE 故意指向一个不存在的路径：98260 的 payload 会在 root shell 之前
+        // 自己 finit_module 把模块塞进去，但它**只做 finit_module**，不做用户空间安装
+        // （/data/adb/ksu/bin/su 与 /system/bin/su 都由 ksud 的 late-load 创建）。
+        // 结果就是「模块已加载、su 永远不出现」。让它的读取失败（KSU_LOAD_FAIL stage=read，
+        // 不在 fatalGate 里）后，交给 ksu_load_setup.sh 的 late-load 一次做完加载+安装。
+        val shellCmd = "cd $WORK_DIR && KSU_MODULE=/data/local/tmp/.ksu-skip-load " +
+            "KSU_LABEL='SukiSU Ultra' ./ptyrun ./pk64560 --run 2>&1"
         val p = try {
             ShizukuHelper.newProcess(arrayOf("sh", "-c", shellCmd))
         } catch (e: Throwable) {
@@ -741,9 +770,47 @@ object RootController {
         // 用 stage0 是否通过当分界线，比逐个匹配 gate 名字更可靠。
         var stage0Passed = false
 
+        // 2026-11-07：原来直接用 reader.readLine()，它是阻塞的。实测 exploit 打进
+        // root shell、脚本跑到 --- su path check --- 之后就长时间没有新输出，界面上
+        // 就是「停在这里什么反应都没有」，好几分钟后才一次性回传并弹窗。改成独立
+        // 线程读、主线程 500ms 一片地轮询：能按时超时、能每 15 秒报一次进度、还能在
+        // su 一可用就立刻收工（脚本那 120 秒等待循环不用干等完）。
         try {
+            val queue = java.util.concurrent.LinkedBlockingQueue<String>()
+            val pump = Thread {
+                try {
+                    reader.forEachLine { queue.put(it) }
+                } catch (_: Throwable) {
+                }
+                queue.put(EOF_MARKER)
+            }
+            pump.isDaemon = true
+            pump.start()
+            var lastNotice = 0L
+            var lastProbe = 0L
             while (System.currentTimeMillis() < deadline) {
-                val raw = reader.readLine() ?: break
+                val raw = queue.poll(500, TimeUnit.MILLISECONDS)
+                if (raw == null) {
+                    if (!injected) continue
+                    val waited = System.currentTimeMillis() - injectedAt
+                    // 3 秒探一次就够：每次探测都要过一次 Shizuku 的 exec，500ms 一次太浪费
+                    val probeDue = waited - lastProbe >= 3000
+                    if (probeDue) lastProbe = waited
+                    if (waited > 3000 && probeDue && suWorks()) {
+                        log(">>> su 已就绪（等待 ${waited / 1000}s），结束等待")
+                        break
+                    }
+                    if (waited > KSU_LOAD_WAIT_MS) {
+                        log(">>> 等 ksud 加载超时（${KSU_LOAD_WAIT_MS / 1000}s），不再等 KSULOAD_END，直接验证 su")
+                        break
+                    }
+                    if (waited - lastNotice >= 15000) {
+                        lastNotice = waited
+                        log(">>> 仍在等 KernelSU 生效（已 ${waited / 1000}s，上限 ${KSU_LOAD_WAIT_MS / 1000}s）")
+                    }
+                    continue
+                }
+                if (raw == EOF_MARKER) break
                 val line = raw.replace("\r", "").replace(ansi, "")
                 if (line.isBlank()) continue
                 log(line)
@@ -755,7 +822,9 @@ object RootController {
                     line.startsWith("BOOTID_WRITE_MISS")
                 ) fatalGate = true
 
-                if (!injected && line.contains("ROOT_CHILD_HOLD_PASS")) {
+                // 64560 打 ROOT_CHILD_HOLD_PASS，98260 打 interactive root child
+                if (!injected && (line.contains("ROOT_CHILD_HOLD_PASS") ||
+                        line.contains("interactive root child"))) {
                     injected = true
                     injectedAt = System.currentTimeMillis()
                     Thread.sleep(1000)
@@ -767,17 +836,13 @@ object RootController {
                     log(">>> 已向 root shell 注入 ksud late-load 命令")
                 }
                 if (line.contains("KSULOAD_END")) break
-                if (injected && System.currentTimeMillis() - injectedAt > KSU_LOAD_WAIT_MS) {
-                    log(">>> 等 ksud 加载超时（${KSU_LOAD_WAIT_MS / 1000}s），不再等 KSULOAD_END，直接验证 su")
-                    break
-                }
             }
             p.waitFor(15, TimeUnit.SECONDS)
         } catch (e: Throwable) {
             log("  读取 exploit 输出中断: ${e.message}")
         }
 
-        if (!injected) log("  未捕获到 ROOT_CHILD_HOLD_PASS（exploit 可能未进入 root shell）")
+        if (!injected) log("  未捕获到 root shell 就绪标记（exploit 可能未进入 root shell）")
         val outcome = when {
             // exploit 在真正动手之前就可能拒绝：指纹不匹配 exit(2)、UHID gate、
             // 环境 gate 等。这些情况下内核没被写过，不该算脏。

@@ -29,7 +29,7 @@
 |---|---|
 | **只在指纹完全匹配时继续** | 内核地址、结构体偏移、slab 参数都是这一版系统上量出来的。版本不对会**把内核写坏**，不是优雅报错 |
 | **临时 root，绝不持久化** | 不要改 boot 分区、不要改 init.rc、不要装 Magisk 式模块。重启即失效是设计目标 |
-| **panic 重启是预期行为** | 约 40% 概率。不要把它当故障去"修"，等它起来重来即可 |
+| **panic 重启仍有可能** | 比 64560 时代低得多，但不是零。不要把它当故障去"修"，等它起来重来即可 |
 | **每步先只读确认，再写** | 这条链会改内核内存。任何写操作前都要有只读证据 |
 
 ### 绝对不要做
@@ -85,7 +85,9 @@ adb -s $S shell 'ps -A -o pid,user,args 2>/dev/null | grep shizuku_server | grep
 # 2.7 内核管理器是否安装（App 要从它里面抽 ksud；两个都查）
 adb -s $S shell 'pm path com.sukisu.ultra; pm path me.weishu.kernelsu'
 # 两个都空 → 让用户先安装
-# SukiSU 优先（lib/arm64/libfdbqiupsrx.so 6102016 B），KernelSU 兜底（libksud.so 5172384 B）
+# SukiSU 优先，KernelSU 兜底。ksud 的伪装文件名会随版本变（实测 libfdbqiupsrx.so ->
+# libtqqfthevwb.so，大小 6102016 -> 6093280），App 会在 lib/arm64/ 下按大小自动找，
+# 不要按文件名硬编码。KernelSU 的 libksud.so 约 4.99 MB。
 ```
 
 ### 2.8 用哪个内核管理器（v1.0.9+）
@@ -156,23 +158,15 @@ adb -s $S shell 'ps -A -o pid,user,args | grep shizuku_server | grep -v grep'
 > 用 `app_process ... moe.shizuku.server.ShizukuService` 会立刻退出（EXIT=0 但无常驻进程）。
 > 这条命令对 Shevery 同样有效（已实测），因为启动器实现一致。
 
-### 3.2 检查系统负载（决定要不要现在跑）
-
-`stage0` 依赖线程竞争时序，负载高时失败即 panic。**不要跳过这一步**：
+### 3.2 检查开机时长（**不要看 loadavg**）
 
 ```bash
-adb -s $S shell 'echo "uptime=$(cut -d. -f1 /proc/uptime) load=$(cut -d" " -f1 /proc/loadavg)"'
+adb -s $S shell 'cut -d. -f1 /proc/uptime'
 ```
 
-判据：
+判据只有一条：`uptime < 120` 时建议等一下再跑（刚起来后台服务还在抢 CPU）。
 
-| 读数 | 判断 |
-|---|---|
-| `load1 > 8` | 别跑。等 or 让用户关后台应用 |
-| `uptime < 300` | 别跑。系统刚起来，后台服务还在抢 CPU |
-| `load1 <= 8` 且 `uptime >= 300` | 可以跑 |
-
-真机实测：OS4.0.0.14 刚开机 `load` 能到 20–35（8 核），这个状态下连跑连崩。**不要相信「等两分钟就好」**——实测 `posix_timers_cache` 会稳定在 256 不收放，`load` 也需要好几分钟才降。
+> ⚠️ **`/proc/loadavg` 在本机完全不可信**：实测长期稳定在 19–21，但同一时刻 `top` 是 `757% idle`、`procs_running=1`、`/proc/pressure/cpu` 全 0。这是被不可中断睡眠（D 状态）污染的读数。历史上多次在 load=20 左右的条件下成功，**不要用 loadavg 判断能不能跑，更不要让用户"等负载降下来"——它不会降**。
 
 ### 3.3 确认 App 侧状态
 
@@ -248,9 +242,8 @@ done
 
 | 阶段 | 成功标志 | 失败标志 | 处理 |
 |---|---|---|---|
-| 部署载荷 | 日志 `pk64560 已就绪`、`ksud 提取成功（com.sukisu.ultra，6102016 bytes）` 或 `（me.weishu.kernelsu，5172384 bytes）` | `未找到 KernelSU / SukiSU 管理器` | 让用户装 KSU 或 SukiSU 管理器 |
-| 布防 kprobe | `PROBE_OK`、日志 `window0=1 tracing_on=1` | `布防失败: window0=0` | 重试一次；仍失败则重启设备 |
-| exploit | `ROOT_CHILD_HOLD_PASS child=... uid=0` | `STAGE0_GATE_FAIL` / 进程消失 | 重跑；连续失败两次先重启 |
+| 部署载荷 | 日志 `pk64560 已就绪`、`ksud 提取成功（com.sukisu.ultra，6093280 bytes）` 或 `（me.weishu.kernelsu，4990848 bytes）` | `未找到 KernelSU / SukiSU 管理器` | 让用户装 KSU 或 SukiSU 管理器 |
+| exploit | `interactive root child`（98260）或 `ROOT_CHILD_HOLD_PASS child=...`（64560） | `STAGE0_GATE_FAIL` / 进程消失 | 重跑；连续失败两次先重启 |
 | 注入 ksud | `late_rc=0`、`kernelsu ... Live` | `late_rc≠0` | 检查 `/data/local/tmp/ksu-root/ksud` 是否存在 |
 | 验证 su | `uid=0(root) ... context=u:r:ksu:s0` | `su: inaccessible or not found` | 见下方「su 不可用」故障条目 |
 
@@ -261,11 +254,11 @@ adb -s $S shell 'su -c "id"'
 # uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
 
 adb -s $S shell 'grep -i kernelsu /proc/modules'
-# kernelsu 233472 1 - Live 0x0000000000000000 (O)
+# kernelsu 536576 1 - Live 0x0000000000000000 (O)
 
 adb -s $S shell 'ls -l /system/bin/su'
-# -rwxr-xr-x 1 root root 5172384 （KernelSU su_compat 伪造的入口）
-# -rwxr-xr-x 1 root root 6102016 （SukiSU 分支，数值等于它自己的 ksud 大小）
+# -rwxr-xr-x 1 root root 4990848 （KernelSU 分支）
+# -rwxr-xr-x 1 root root 6093280 （SukiSU v4.3.0/41100 分支，数值等于它自己的 ksud 大小）
 ```
 
 ---
@@ -381,7 +374,7 @@ adb -s $S shell '/data/local/tmp/ksu-root/pk64560 --selftest'
 | 为什么这么慢 | 内核 slab 竞争，要反复试 |
 | 为什么每次都要开 Shizuku | 它是用户态进程，不在 init 服务表里，重启就没了 |
 | 能装 Magisk 模块吗 | 不能，这不是 Magisk |
-| 关掉以后有残留吗 | 没有，重启即清；但本次开机内内核里有 dangling timer，可能随机 panic |
+| 关掉以后有残留吗 | 重启即清。但本次开机内可能还有悬空 timer 节点：多轮 `ATTEMPT_DEFER` 残留的 victim 会累积，长时间锁屏深度休眠后有小概率崩 |
 
 ---
 
@@ -454,7 +447,7 @@ BASE=$(adb -s $S shell 'pm path moe.shizuku.privileged.api' | tr -d '\r' | sed '
 adb -s $S shell "setsid $BASE/lib/arm64/libshizuku.so --apk=$BASE/base.apk > /tmp/shiz.log 2>&1 < /dev/null &"
 
 # 跑 exploit（命令行全流程，跳过 App UI）
-adb -s $S shell 'sh /data/local/tmp/ksu-root/kp_arm.sh'
+# 注意：98260 版本不需要 kprobe 布防（kp_arm.sh 仅 64560 时代需要）
 printf 'sh /data/local/tmp/ksu-root/ksu_load_setup.sh\nexit\n' \
   | adb -s $S shell -tt 'cd /data/local/tmp/ksu-root && ./pk64560 --run'
 

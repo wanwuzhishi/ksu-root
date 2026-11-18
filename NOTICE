@@ -8,14 +8,17 @@ Copyright 2026 wanwuzhishi
 
 1) 漏洞利用载荷  assets/pk64560
 
-   来源：ChaYeWuu/prague-CVE-2026-64560-OS4.0
-         https://github.com/ChaYeWuu/prague-CVE-2026-64560-OS4.0
+   来源：ChaYeWuu/prague-CVE-2026-98260-OS4.0
+         https://github.com/ChaYeWuu/prague-CVE-2026-98260-OS4.0
    版权：Copyright 2026 ChaYeWuu
    许可：Apache License, Version 2.0
 
    说明：二进制原样取自上游 payload/libexploit.so，未做任何修改。
          本项目的贡献在于把它封装成 Android App、编排执行流程、
          并提供 pty 与 KernelSU 用户态注入的自动化。
+
+   （历史版本 v1.0.x / v1.1.x 的载荷来自
+     ChaYeWuu/prague-CVE-2026-64560-OS4.0，同样是 Apache-2.0。
 
 2) pty 辅助程序  assets/ptyrun
 
@@ -58,11 +61,16 @@ Copyright 2026 wanwuzhishi
 三、上游漏洞与修复
 ====================================================================
 
-本工具利用的漏洞为 CVE-2026-64560：
+本工具利用的漏洞为 CVE-2026-98260：
 
-  上游修复 commit  920f893f735e92ba3a1cd9256899a186b161928d
-                   "posix-cpu-timers: Prevent UAF caused by non-leader exec() race"
-  6.6 回移       12a891c773aeb5823d63dbd0cb2ab931d6c21c9b
+  上游修复标题   "exec: Cleanup POSIX timers right after de_thread()"
+  影响范围       Linux Kernel <= 7.3-rc3
+  CWE            CWE-825 / CWE-416
+  CVSS 3.1       7.8 (High)
+
+  说明：5.15 与 6.12 两个分支的修复内容一致——把 posix_cpu_timers_exit()
+        从 exec_mmap() 之后提前到 de_thread() 紧后面执行。本机内核
+        6.12.69-android16-6（2026-04 构建）早于修复，未打补丁。
 
 本仓库不包含该漏洞的原始研究成果，仅复用上述上游项目公开的利用代码。
 
@@ -73,7 +81,7 @@ Copyright 2026 wanwuzhishi
 本软件仅供安全研究与自有设备调试使用。使用者需自行承担：
 
   - 设备内核 panic、意外重启、数据丢失
-  - 系统稳定性下降（利用链会在内核中留下 dangling timer）
+  - 系统稳定性下降（多轮失败时可能在一次开机内累积悬空 timer 节点）
   - 保修失效
   - 违反当地法律法规的风险
 

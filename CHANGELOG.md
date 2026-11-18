@@ -1,5 +1,289 @@
 # Changelog
 
+## [1.2.9] - 2026-11-18
+
+### 状态卡片不再显示 loadavg
+
+- 「系统: 负载 19.9」这行删掉了，改成「系统: 已开机 25 分钟」。
+- 原因：本机 `/proc/loadavg` 长期 19–21，但同一时刻 `top` 是 757% idle、`procs_running=1`、`/proc/pressure/cpu` 全 0 —— 是被 D 状态污染的读数，显示它只会让用户误以为"系统很忙"。
+- `refresh()` 里 `load1 > 8f` 那条「建议等系统闲下来再开」也一并删掉，只在 `uptime < 120` 时提示「刚启动，建议等两分钟再开」。
+- 关于页主描述里的「运行 CVE-2026-64560 内核提权链」改成 `CVE-2026-98260`，耗时从「3–8 分钟」改成「2–5 分钟」。
+
+## [1.2.8] - 2026-11-18
+
+### 文案全面刷新
+
+- **软件内「关于」页**：漏洞从 CVE-2026-64560 改为 CVE-2026-98260，补了漏洞机制说明；删掉「约 40% 概率 panic（实测 17 次里 7 次）」与「系统负载高时失败率更高」这两条过时/错误的说法；实测记录补到 2026-11-18（v1.2.6 一次跑通）；致谢加上 98260 上游。
+- **README**：新增「漏洞：CVE-2026-98260」一节；「这是什么」的对比表去掉 kprobe 布防那一行；「工作原理」按 98260 的八步重写；「实测记录」按 CVE 分成 98260 / 64560 两张表；「已知限制」删掉 loadavg 相关的错误建议，改为「loadavg 在本机不可信」；补上「`ksud late-load` 不能拆开」这个 1.2.6 踩过的坑。
+- **AI-GUIDE.md**：3.2 节从「检查系统负载」改成「检查开机时长（不要看 loadavg）」；判据表删掉「布防 kprobe」行；`su` 文件大小示例更新为 4990848 / 6093280；命令速查去掉 `kp_arm.sh`。
+- **NOTICE**：payload 来源改为 `prague-CVE-2026-98260-OS4.0`；上游漏洞章节改为 CVE-2026-98260 的修复说明。
+
+## [1.2.7] - 2026-11-18
+
+### 修复成功弹窗误报「没找到管理器」
+
+- `MainActivity.currentManagerPkg()` 原来用 `getLaunchIntentForPackage() != null` 判断「装没装」。SukiSU 的主 Activity（`com.sukisu.ultra/.ui.qmhhdkjpvkqActivity`）只声明了 `CATEGORY_DEFAULT`、没有 `CATEGORY_LAUNCHER`，这个方法返回 null，于是**刚从这个管理器提完 ksud，弹窗却说「没找到已安装的 KernelSU / SukiSU 管理器」**。
+- 改用 `getPackageInfo(pkg, 0)` 判断安装；「打开管理器」按钮加 fallback：拿不到 launch intent 时退回 `ACTION_MAIN + CATEGORY_DEFAULT`。
+
+## [1.2.6] - 2026-11-18
+
+### 修复「模块加载了但 su 永远不出现」
+
+- 98260 的 payload 在 root shell 之前自己 `finit_module` 把模块塞进内核，但它**只做 finit_module**，不创建 `/data/adb/ksu/bin/su` 与 `/system/bin/su`——这两个是 `ksud late-load` 的用户空间安装部分做的。
+- 而 `ksu_load_setup.sh` 看到 `/proc/modules` 里有 `kernelsu` 就跳过 `late-load`，两边各做一半，结果模块在、`su` 永远不存在。
+- 修法：`KSU_MODULE` 指向一个不存在的路径，让 payload 的读取失败（`KSU_LOAD_FAIL stage=read`，不在 fatalGate 里），模块完全交给 `ksu_load_setup.sh` 的 `late-load` 一次做完「加载 + 安装」；脚本的短路条件也改成「模块在 **且** `su` 在」才算就绪。
+- 2026-11-18 真机验证：一次跑通，`su -c id` 返回 `uid=0 context=u:r:ksu:s0`。
+
+## [1.2.5] - 2026-11-18
+
+### 移除平板（sheng）支持，只保留 prague
+
+- 删除 `app/src/main/assets/pk64560-sheng`（141,144 B）与 `ASSETS` 里对应的条目。
+- 删除 `runExploit()` 里按 `getprop ro.product.device` 选 payload 的分支，固定用 `./pk64560`。
+- `chmod 755` 恢复成只处理 `pk64560` / `ptyrun` / 两个脚本。
+
+**原因**：CVE-2026-98260 在 5.15.194 上不成立 —— 它依赖 6.12 的 `mmap_read_lock_killable`
+制造 `exec_mmap()` 失败，而 5.15 的 `exec_mmap()` 用的是不可中断的 `mmap_read_lock()`，
+`exec_update_lock` 也没有外部竞争者，触发条件造不出来。平板改用 GhostLock（CVE-2026-43499）。
+
+### 影响面
+- 手机（prague）路径零改动：`pk64560` 仍是 2,296,288 B / `ab4e76d2...`，与 v1.2.0 一致。
+- APK 体积减少约 141 KB。
+
+## [1.2.2] - 2026-11-18
+
+### 双设备支持
+- 同一个 APK 现在同时带两份 payload：
+  - `pk64560` — prague（Redmi K90 Max，6.12.69），2,296,288 B
+  - `pk64560-sheng` — sheng（Xiaomi Pad 6S Pro，5.15.194），137,560 B
+- 运行时按 `getprop ro.product.device` 选：`sheng` → `pk64560-sheng`，其余 → `pk64560`。两个设备互不影响。
+
+### sheng 的 slab drain 参数
+- `slab_drain_target` 0 → 3000：5.15 的 `posix_timers_cache` 有 per-CPU `cpu_partial` 保留，跑满 32 轮后 `total` 稳定在 5700~7100，1024 的硬墙永远过不去。
+- `attempts` 32 → 8、`rcu_flush_timers` 12000 → 8000：减少每轮净增的 slab 页，把 `total` 压在 3000 以内。
+
+## [1.2.1] - 2026-11-18
+
+### 适配 Xiaomi Pad 6S Pro（sheng / 5.15.194-android13-8）
+
+- payload 换成按 sheng 5.15.194 重新编译的 98260 版本（137,456 B，sha256 `cb99fee5781521e797ddc8af7185f707098aca0fed4e6db294e71a5e89a0a5d8`）。
+- 替换 20 个 `LINK_*` 符号地址（`_text` = `0xffffffc008000000`）与 24 个 `DP_*` 结构偏移（`task_struct` 0x1200 / `cred` 0xb0 / `vmemmap` `0xfffffffe00000000`）。
+- 5.15 没有 `page->page_type`，slab 判定改为 `page->flags & (1 << PG_slab=9)`；`module_direct_base`/`module_plt_base` 校验删除。
+- 新增 `STANDALONE_PROFILE_SHENG`：指纹 `Xiaomi/sheng/sheng:`，内核串 `5.15.194-android13-8-00019-gf4321180a397-ab15212794`；`race_cpu_limit=2`/`race_cpu_base=0`（sheng 的 cpu 5/6 `sched_setaffinity` 返回 EINVAL）；`timer_goal=41000`。
+
+### 未验证
+
+- sheng 上 `--stageb` 8 轮均为 `blocked=1 state=D`，但 5.15 的 `exec_mmap` 使用不可中断的 `mmap_read_lock`（6.12 是 `mmap_read_lock_killable`），触发层是否真实命中尚未确认。
+- prague 分支未改动。
+
+## [1.2.0] - 2026-11-08
+
+### 换漏洞：CVE-2026-64560 → CVE-2026-98260
+
+触发层整个替换，内核任意读写 / cred 提权 / KernelSU 加载这些下游链路保持同源。
+
+**为什么换**：
+
+| | CVE-2026-64560（旧） | CVE-2026-98260（新） |
+|---|---|---|
+| 竞争窗口 | 14 条指令 ≈ 10ns | 由父进程 `wait4()` 决定，可无限长 |
+| kprobe 扰动 | 必须有，否则几乎打不中 | **完全不需要** |
+| tracefs / readtracefs | 需要 | 不需要 |
+| 每轮失败判据 | 无（只能看结果） | `R98260_GATE blocked=N` |
+
+旧漏洞的窗口窄到必须靠 kprobe 在同一位置插一条探针把时间拉开（实测无扰动 21 次全 miss），
+而探针会被 miuibpf 周期性抢占、需要 `kp_guard.sh` 每秒守护、每次重启都要重做。
+新漏洞的窗口是「B 变僵尸后父进程先不回收」——只要我们别急着 `wait4`，节点就一直挂着，
+窗口长度由我们自己控制。所以这条路上根本不需要 kprobe。
+
+**具体改动**：
+- `assets/pk64560` 换成 98260 版 payload（2,296,288 B，静态链接 ET_EXEC，无 PT_INTERP）。
+- 新增 `assets/sukisu-prague.ko`（646,392 B，uapi=6）。98260 版 payload 自己 `finit_module`，
+  模块路径通过 `KSU_MODULE` 环境变量传入；部署阶段会把它复制到
+  `/data/local/tmp/kernelsu-prague.ko`（旧的上游 uapi=2 模块会被备份成 `.old`）。
+- `[3/5]` 不再布防 kprobe，只确认 `/proc/modules` 里没有残留模块；`kp_arm.sh` 保留在包内供回退。
+- `ksu_load_setup.sh`：`late-load` 改成「已加载则跳过，未加载才 fallback」——模块通常已经被
+  exploit 加载好了，重复 late-load 会撞 `File exists`。
+- root shell 就绪判据同时认 64560 的 `ROOT_CHILD_HOLD_PASS` 和 98260 的
+  `interactive root child`。
+
+**保留不变**：Shizuku 授权检查、payload sha256 内容校验、非阻塞读 + su 探测、
+`slab_drain_active_limit`、`retire_victims_safe`（锁屏重启修复）、成功对话框、su 进度弹窗、
+`shell_su_adb_only` 关闭。
+
+### 已验证
+- 编译通过，`--selftest` 由 payload 自己提供（本次没有）。
+- 未验证：真机完整跑通。这是换漏洞，不是小改，第一次跑可能 panic。
+
+## [1.1.15] - 2026-11-08
+
+### 修复：锁屏十几分钟后必然重启
+
+**现象**：v1.1.10 之后，root 成功后只要锁屏等待十几分钟就必然重启；不锁屏不重启。v1.1.7 没有这个问题。
+
+**根因**：`ATTEMPT_DEFER` 的轮次会把 victim 留在 `pause()` 里不 reap（源码注释写的是「允许存活」）。这些 victim 的 32 个 `k_itimer` 已经被 `exit_itimers()` 释放（`posix_cpu_timer_del()` 里 `pid_task()` 返回 NULL → 直接 `goto out`，一次 disarm 都没做），但 timerqueue 节点还挂在它们的 rbtree 上。
+
+v1.1.7 一次跑通（attempt=1 命中），没有残留 victim，所以不重启；v1.1.10 把 `slab_drain_target` 从 1280 收回 1024 之后，每轮要跑 6 次 attempt，其中 4~5 次 DEFER 各留一个 victim 挂着 32 个悬空节点。锁屏后系统回收内存，OOM killer 杀掉这些 victim ⇒ `cleanup_timerqueue()` 对已释放节点做 `rb_erase` ⇒ `rb_next` 读 `node->rb_right`，而对象 `+0x80` 正是 SLUB 给这个 cache 放的 freepointer（`swab(ptr) ^ random`）⇒ 踩空 panic。
+
+**修法**（移植自 CVE-2026-98260 项目 KAIROS-KSU 的 `retire_victims_safe`）：失败轮次在 `ATTEMPT_DEFER` 之前先做安全收尸 ——
+
+1. `kill` 全部 victim；
+2. `drain_timer_freelist()`：用 `SIGEV_NONE` 定时器（`syscall(SYS_timer_create, CLOCK_MONOTONIC, ...)`，永不入树、`kmem_cache_zalloc` 走 zeroed 路径把 `+0x80` 清零）持续把 cache 的空闲槽抓走。每轮只占 `total - active` 个，绝不多占（多占会让 SLUB 新开 slab，判据永远不成立）；
+3. 连续 `RETIRE_STABLE_SAMPLES`（40 × 25ms = 1s）一个都没抓到，才认为 RCU 队列已排空；
+4. 只有 drained 才 `waitpid`。`RETIRE_ABORT` 时**不 reap**，留一个活着的 victim 等下一轮，比踩 freepointer panic 好。
+
+判据不是 `active == total`：上游实测 `672/672` 时只攥住 147 个，另外 525 个是遗留和 RCU 在途对象——「全部已分配」和「全部被我们占住」是两回事。
+
+### 新增日志
+- `TIMER_HOLD stage=%s held=%d active=%d total=%d gained=%d`（只在真抓到对象时打）
+- `RETIRE_GATE stage=%s active=%d total=%d held=%d rounds=%d stable=%d drained=%d`
+- `RETIRE_ABORT stage=%s survivors=%d reason=freelist_unstable ...`
+
+### 已验证
+- 编译通过（`-Werror` 零警告，`-Wshadow -Wextra` 全开）。
+- 未验证：真机完整 `--run` + 锁屏 15 分钟。
+
+## [1.1.14] - 2026-11-08
+
+### 修复：root 成功后锁屏十几分钟必重启（v1.1.10 引入的回归）
+
+用户实测：v1.1.7 没有这个问题，v1.1.10 之后有；不锁屏不重启，锁屏十几分钟必重启。
+
+差异在 drain 阈值：
+
+| 版本 | slab_drain_target | active_limit | 实测 attempt |
+|---|---|---|---|
+| v1.1.7 | 1280 | 无 | 1 次（一次跑通） |
+| v1.1.10+ | 1024 | 640 | 6 次（4 次 NOT_DRAINED 重试） |
+
+v1.1.10 把 `slab_drain_target` 从 1280 收回到 1024 是为了治 v1.1.9 的 panic，
+但副作用是 `864/896/992` 这些「active 已经很低」的轮次也被 total 判据拒掉，attempt
+次数从 1 涨到 6。每多跑一轮就多一轮 56000 个 race timer + 72000 次 `RCU_FORCE`
+的创建删除，失败的轮次里被 UAF 碰过的 slab 页不会立刻归还，锁屏进 doze 集中回收
+slab 时就崩。
+
+两处改动：
+
+1. `slab_drain_target` 回退到 **1280**（v1.1.7 的取值），`active_limit` 保留 **640**
+   —— active 才是 v1.1.9 那次 panic 的真正区分力（成功 547/800、579/768；崩掉
+   726/832），total 放宽不影响这个防护，但能少跑几轮。
+2. root 成功后、加载 KernelSU 模块前加 `slab_settle_wait("post_root", 512, 12000)`，
+   最多等 12 秒让 `posix_timers_cache` 回落。等不到也继续，不阻断。
+
+预期：attempt 次数回到 1-2 次量级，锁屏后的延迟崩溃概率显著下降。
+
+### 已验证
+- 编译零警告。
+- **未做真机验证**。
+
+## [1.1.13] - 2026-11-07
+
+### 修复：注入 ksud 之后界面长时间没有任何反应
+
+现象：日志打在 `--- su path check ---` 之后就不动了，界面完全没反馈，好几分钟后
+才一次性回传并弹出「root 已就绪」。
+
+根因是 `runExploit()` 用 `reader.readLine()` 直接读 pty，而它是**阻塞**的：exploit
+进入 root child 之后 pty 不再实时回传，`readLine()` 就一直挂在那里，循环体里所有
+的时间检查（240 秒上限、进度提示）都永远轮不到。`ksu_load_setup.sh` 里那段
+`su` 等待循环本身还要跑 40×3 = 120 秒，加起来就是「几分钟没动静」。
+
+改成独立线程读、主线程 500ms 一片地轮询：
+
+- 流里没数据时也能按时做超时判断，不再依赖「有新行输出」才检查；
+- 每 3 秒探一次 `su -c id`，一可用立刻收工——不用干等脚本那 120 秒；
+- 每 15 秒打一行 `>>> 仍在等 KernelSU 生效（已 Xs，上限 240s）`，日志里有动静；
+- 流结束用 `EOF_MARKER` 哨兵表示，与「暂时没数据」区分开。
+
+配套的 UI 改动：注入 ksud、等待进度提示、`[5/5]` 轮询这三处都会弹出进度对话框
+（内部加了幂等保护，不会重复弹），对话框每 500ms 更新已等待秒数。
+
+### 说明
+
+`shell_su_adb_only` 在日志里显示 `[ENABLED (1)]` 是**正常的**——那一刻脚本还没跑到
+第 45 行的 `feature set shell_su_adb_only 0`。最终 `su -c id` 能返回 `uid=0` 就说明
+脚本跑完了，只是输出没实时回传。
+
+### 已验证
+- 编译零错误。
+- **未做真机验证**（设备当时不在线）。
+
+## [1.1.12] - 2026-11-07
+
+### 修复：ELF 边界检查可被 uint64 加法回绕绕过（严重）
+
+`ksu_patch_module()` 校验 `.ko` 内部偏移用的是 `a + b > size` 形式：
+
+```c
+header->e_shoff + (size_t)header->e_shnum * sizeof(Elf64_Shdr) > size
+symtab->sh_offset + symtab->sh_size > size
+strtab->sh_offset + strtab->sh_size > size
+```
+
+`e_shoff` / `sh_offset` 都是 ELF 头里的 64 位字段，畸形模块让两个大值相加回绕成
+小值就能通过检查，随后 `sections` / `symbols` / `names` 全部落在 `image` 之外，
+写符号时越界写 `st_value` / `st_shndx`。改成减法形式（先判 `offset > size`，
+再判 `size - offset`）：
+
+```c
+header->e_shoff > size ||
+    (size_t)header->e_shnum > (size - (size_t)header->e_shoff) / sizeof(Elf64_Shdr)
+symtab->sh_offset > size || symtab->sh_size > size - symtab->sh_offset
+strtab->sh_offset > size || strtab->sh_size > size - strtab->sh_offset
+```
+
+正常模块不受影响（`ksu_symbols.inc` 里 218 个符号全部通过）。
+
+### 修复：victim 就绪等待没有超时，可能永久空转
+
+`run_race()` 里 `while (!atomic_load(&shared->victim_ready)) cpu_relax();`。
+`victim_process()` 是 fork 出来的子进程，有六条 `_exit()` 提前退出路径（pin CPU
+失败、`/dev/null` 打不开、`pthread_create` 失败、`sched_getcpu()` 不是 7 等），
+任何一条都不会置 `victim_ready`。子进程退出不影响父进程，于是父进程会一直
+100% CPU 空转到天荒地老，同时内核状态可能已被污染、又永远走不到
+`terminate_and_reap` 的清理。加 5 秒 deadline，超时 `kill(SIGKILL)` + `waitpid`
+后返回失败。
+
+### 修复：`setsockopt(SO_SNDBUF)` 失败被静默忽略
+
+spray 阶段的 socket 缓冲区设置失败时原来继续跑。注释自己就写着「sndbuf 太小会让
+af_unix 把 send(8192) 切碎，拿不到 order-1 页」——失败后只会在很远的地方以
+`ORDER1_STATE_UNKNOWN` 失败，白烧一轮还看不出根因。改成当场 close socket、回滚
+已建的 pairs、`free(pairs)` 后 `die()`。
+
+### 清理
+
+- `find_task_stable()` 的 `-2` 早退没有 free `visited`（`calloc(65536, 16)` ≈ 1MB）。
+- `bridge_read_once()` / `bridge_write_once()` 里各有一处与 `kernel_target_valid()`
+  首句完全重复的长度检查（死代码）。
+- `read_boot_id()` 的 `length >= 64` 恒假（`read` 上限就是 63），改成 `length > 63`。
+- `struct rcu_flush_state` 的 `timer_ids` 字段从未赋值也从未读取，删除。
+- `verify_real_uhid()` 在 `main` 里连着调了两次，去掉多余的一次。
+- `slab_drain_active_limit` 上方的注释还停留在 5.15 版的「681/800 通过」，与 640
+  的实际阈值矛盾，改写成 v1.1.10 的真机对照数据。
+
+### 审查记录
+
+这一版是三个人分工静态审查 6847 行 C + 1651 行 Kotlin 的结果。已经排除的疑点：
+`parse_boot_id` 边界、`build_misc_fragments` 最大偏移 0x1F98 < 0x2000、16 处
+`malloc/calloc/realloc` 全部有 NULL 检查、188 个 static 函数无死函数、
+`-Wshadow -Wconversion` 零警告、pipe 物理读写跨页分块、`restore_misc_list` 的
+`seen[4096]` 边界、`collect_exec_acks` 边界。
+
+### 未修（记录在案）
+
+- `timerfd_settime` 失败后仍计入 `irq_armed`——要改 arm 协议，风险大于收益。
+- `pthread_attr_setstacksize` / `dup2` / `pthread_detach` 返回值未检查——失败概率极低。
+- `irq_arm_after_deleted` 分支实际不可达（所有 profile 都设 -1），是死代码但保留。
+- `marker_result` 只写不读——但 `probe_hit_now()` 末尾是 `*out = result;` 不判 NULL，
+  要先给它加检查才能删。
+- `run_stage8_root_probe` 的十处 `return -2` 绕过 `munmap` / `prctl`——调用方都走
+  `hold_cred_unknown()` 且 noreturn，当前无可观测后果。
+
+### 已验证
+- 编译零警告（`-Wall -Wextra -Wshadow -Werror`），`--selftest` 9 用例过。
+- **未做真机验证**（设备当时不在线）。
+
 ## [1.1.11] - 2026-11-07
 
 ### 新增：验证 su 阶段的进度弹窗

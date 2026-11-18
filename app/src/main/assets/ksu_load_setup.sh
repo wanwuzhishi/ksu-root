@@ -12,11 +12,25 @@ echo "=== KSULOAD_BEGIN ==="
 echo "id: $(id 2>&1)"
 echo "enforcing: $(getenforce 2>&1)"
 echo "ksud: $("$DIR/ksud" -V 2>&1)"
-echo "--- late-load (ko embedded in ksud) ---"
-"$DIR/ksud" late-load --allow-shell > /data/local/tmp/late5.log 2>&1
-echo "late_rc=$?"
-sleep 4
-grep -i kernelsu /proc/modules 2>&1
+# CVE-2026-98260 版本由 exploit 自己 finit_module 加载 LKM（KSU_MODULE 指定），
+# 所以这里通常已经加载好了，不要重复 late-load（同名模块会 File exists）。
+echo "--- module status ---"
+# 只有「模块在 + su 也在」才算真正就绪。只加载模块不做用户空间安装的话，
+# /data/adb/ksu/bin/su 与 /system/bin/su 都不会出现，此时必须走 late-load。
+if grep -qi kernelsu /proc/modules 2>/dev/null && [ -x /system/bin/su ]; then
+  echo "module: already loaded and su present"
+  grep -i kernelsu /proc/modules 2>&1
+else
+  if grep -qi kernelsu /proc/modules 2>/dev/null; then
+    echo "module: loaded but su missing (finit_module without userspace install)"
+  else
+    echo "module: NOT loaded, fallback to late-load"
+  fi
+  "$DIR/ksud" late-load --allow-shell > /data/local/tmp/late5.log 2>&1
+  echo "late_rc=$?"
+  sleep 4
+  grep -i kernelsu /proc/modules 2>&1
+fi
 echo "enforcing_after: $(getenforce 2>&1)"
 echo "--- debug info ---"
 "$DIR/ksud" debug info 2>&1

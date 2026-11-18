@@ -4,6 +4,7 @@ import androidx.appcompat.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
 import android.os.Bundle
@@ -142,8 +143,15 @@ class MainActivity : AppCompatActivity() {
             tvLog.text = logBuf.toString()
             scrollLog.post { scrollLog.fullScroll(ScrollView.FOCUS_DOWN) }
             updateProgress(s)
-            // exploit 跑完后 App 还要轮询 su 最多 4 分钟，这段没有反馈会让人以为卡死
-            if (s.startsWith("[5/5]")) showSuVerifyDialog()
+            // 注入 ksud 之后、以及 [5/5] 轮询 su 期间都可能长时间没有新日志
+            // （exploit 进 root child 后 pty 不实时回传），这两段都必须给反馈，
+            // 否则界面上就是「停在这里，什么反应都没有」。
+            if (s.startsWith(">>> 已向 root shell 注入") ||
+                s.startsWith(">>> 仍在等 KernelSU") ||
+                s.startsWith("[5/5]")
+            ) {
+                showSuVerifyDialog()
+            }
             if (s.startsWith("=== ") || s.contains("su 就绪") || s.contains("不可用，请重启")) {
                 dismissSuVerifyDialog()
             }
@@ -199,7 +207,6 @@ class MainActivity : AppCompatActivity() {
             tvStatus.text = "检查中 ..."
             val st = RootController.checkStatus(this@MainActivity)
             val uptime = RootController.uptimeSec()
-            val load1 = RootController.load1m()
             refreshManagerLabel()
             tvStatus.text = buildString {
                 append("Shizuku: ").append(st.shizuku).append('\n')
@@ -214,15 +221,12 @@ class MainActivity : AppCompatActivity() {
                 }.append('\n')
                 append("SELinux: ").append(st.selinux).append('\n')
                 append("模块: ").append(if (st.module.contains("kernelsu")) "kernelsu 已加载" else "未加载").append('\n')
-                append("系统: ").append(String.format(Locale.US, "负载 %.1f", load1))
-                if (!st.root) {
-                    // 刚开机和负载高是两件事，提示要分开说，
-                    // 否则会出现「负载 0.0 · 偏高」这种自相矛盾的显示
-                    if (uptime < 300) {
-                        append(" · 刚开机 ").append(uptime).append("s，建议等 5 分钟")
-                    } else if (load1 > 8f) {
-                        append(" · 偏高，建议等系统闲下来再开")
-                    }
+                // 不显示 loadavg：本机 /proc/loadavg 长期 19–21，但同一时刻 top 是
+                // 757% idle、procs_running=1、/proc/pressure/cpu 全 0，是被 D 状态污染的
+                // 读数。显示它只会让用户误以为"系统很忙"。只报开机时长。
+                append("系统: 已开机 ").append(uptime / 60).append(" 分钟")
+                if (!st.root && uptime < 120) {
+                    append(" · 刚启动，建议等两分钟再开")
                 }
             }
         }
@@ -354,6 +358,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSuVerifyDialog() {
+        // 幂等：注入 ksud、15 秒进度提示、[5/5] 三处都会调到这里，
+        // 已经弹着就别重复弹
+        if (suDialog != null) return
         if (suDialog?.isShowing == true) return
         suDialogStart = System.currentTimeMillis()
         val pad = (24 * resources.displayMetrics.density).toInt()
@@ -412,18 +419,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle("root 已就绪")
             .setMessage(msg)
             .setPositiveButton(if (pkg == null) "好" else "打开管理器") { _, _ ->
-                if (pkg != null) {
-                    val intent = packageManager.getLaunchIntentForPackage(pkg)
-                    if (intent == null) {
-                        appendLog("  打开 $pkg 失败（没有启动入口）")
-                    } else {
-                        try {
-                            startActivity(intent)
-                        } catch (e: Throwable) {
-                            appendLog("  打开 $pkg 失败: ${e.message}")
-                        }
-                    }
-                }
+                if (pkg != null) openManager(pkg)
             }
             .setNegativeButton(if (pkg == null) null else "稍后", null)
             .show()
@@ -438,9 +434,38 @@ class MainActivity : AppCompatActivity() {
             RootController.KSU_MANAGERS.map { it.pkg }
         }
         for (p in candidates) {
-            if (packageManager.getLaunchIntentForPackage(p) != null) return p
+            // 用 getPackageInfo 判断「装没装」，不要用 getLaunchIntentForPackage：
+            // SukiSU 的主 Activity 只声明了 CATEGORY_DEFAULT、没有 CATEGORY_LAUNCHER，
+            // getLaunchIntentForPackage 会返回 null，于是已装的管理器被误报成「没找到」。
+            if (isPkgInstalled(p)) return p
         }
         return null
+    }
+
+    private fun isPkgInstalled(pkg: String): Boolean = try {
+        packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+    /** 打开管理器主界面；没有 LAUNCHER category 时退回 ACTION_MAIN + CATEGORY_DEFAULT。 */
+    private fun openManager(pkg: String) {
+        val direct = packageManager.getLaunchIntentForPackage(pkg)
+        if (direct != null) {
+            try {
+                startActivity(direct)
+                return
+            } catch (e: Throwable) {
+                appendLog("  打开 $pkg 失败: ${e.message}")
+            }
+        }
+        val alt = Intent(Intent.ACTION_MAIN).setPackage(pkg).addCategory(Intent.CATEGORY_DEFAULT)
+        try {
+            startActivity(alt)
+        } catch (e: Throwable) {
+            appendLog("  打开 $pkg 失败: ${e.message}")
+        }
     }
 
     private fun startDisable() {
@@ -623,7 +648,7 @@ class MainActivity : AppCompatActivity() {
 
         private const val ENABLE_RISK_HTML = """
 <b>会做什么</b><br>
-运行 CVE-2026-64560 内核提权链，把 KernelSU 模块加载进内核。全程约 3–8 分钟，中途不能退出 App。<br><br>
+运行 CVE-2026-98260 内核提权链，把 KernelSU 模块加载进内核。全程约 2–5 分钟，中途不能退出 App。<br><br>
 
 <b>可能出现的现象</b><br>
 · 屏幕卡住、日志长时间不动 —— 正常，正在跑内核竞争<br>
@@ -670,35 +695,44 @@ REDMI K90 Max（型号 2604FRK1EC，代号 prague）<br>
 内核 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k<br>
 安全补丁 2026-09-01 / 2026-10-01<br><br>
 
+<b>漏洞</b><br>
+CVE-2026-98260 —— <code>exec</code> 在 <code>de_thread()</code> 之后、<code>exec_mmap()</code> 之前没有清理 POSIX CPU timer。非 leader 线程 exec 时，<code>de_thread()</code> 把 leader 的 <code>struct pid</code> 从 PIDTYPE_PID 桶里摘掉；<code>exec_mmap()</code> 一旦失败返回，<code>posix_cpu_timers_exit()</code> 还没跑到，而 <code>posix_cpu_timer_del()</code> 拿 <code>pid_task()</code> 找不到 task 就直接返回、不 disarm，<code>k_itimer</code> 照常释放 —— 内核定时器树里留下一个指向已释放对象的节点。<br>
+与上一代 CVE-2026-64560 的关键区别：<b>竞争窗口由父进程是否 wait4 决定，不再依赖 kprobe 扰动</b>，所以本版本不再需要 tracefs、不再需要布防探针。<br><br>
+
 <b>已实测通过的组合</b><br>
 REDMI K90 Max / OS4.0.0.14.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k<br>
-2026-10-25 两次成功：<br>
-· 冷启动一次过，约 5 分钟，全程无重启<br>
-· 中途 panic 重启，靠「断点续跑」第二次成功<br><br>
+· 2026-10-25：冷启动一次过，约 5 分钟<br>
+· 2026-10-25：中途 panic 重启，断点续跑第二次成功<br><br>
 
-REDMI K90 Max / OS4.0.5.0.XAACNXM / 6.12.69-android16-6-g586bfab1b9c5-abogki536749445-4k<br>
-2026-11-05 两次尝试：<br>
-· 第一次 stage0 panic 重启<br>
-· 第二次成功，su -c id 返回 uid=0 context=u:r:ksu:s0<br><br>
+REDMI K90 Max / OS4.0.5.0.XAACNXM / 同一内核二进制<br>
+· 2026-11-05：第一次 stage0 panic 重启，第二次成功<br><br>
 
-<b>OS4.0.5.0 的支持依据（已真机验证）</b><br>
-OTA 的 boot.img 解出的内核与 4.0.0.14 是同一个二进制：git hash、ABO build id、编译时间全部相同，CVE-2026-64560 的上游修复（920f893f）不在其中。逐地址反汇编核验过 7 处硬编码——release_task 写 sighand=NULL 仍是普通 str、posix_cpu_timer_del 的两个调用点、configfs 两个 iter 入口——全部落在同一偏移。<br>
-2026-11-05 真机实测通过：TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0 / STAGE0_GATE_PASS slide=0x23fe600000 / ROOT_CHILD_HOLD_PASS / KSU_LOAD_PASS，su -c id 返回 uid=0 context=u:r:ksu:s0。第一次跑 panic 重启，第二次成功。运行日志开头的 <b>TARGET_PROFILE_GATE_PASS profile=prague-os4.0.5.0</b> 可用于确认版本识别。<br><br>
+REDMI K90 Max / OS4.0.5.0.XAACNXM / 同上（v1.1.0 起改用 SukiSU Ultra 内核模块）<br>
+· 2026-11-06：SukiSU 分支首次全链通过<br>
+· 2026-11-07：v1.1.11 发布版本<br>
+· 2026-11-18：v1.2.6（CVE-2026-98260 版本）一次跑通，零 panic、零重启<br><br>
+
+<b>OS4.0.5.0 的支持依据</b><br>
+那个 OTA 没有重编内核。把 OTA 的 boot.img 解出来的内核与 4.0.0.14 是同一个二进制：版本串、git hash、ABO build id、编译时间全部相同。逐地址反汇编核验过关键偏移全部吻合。系统版本号不是判据，<b>uname -r 和 ABO build id 才是</b>。<br><br>
 
 <b>其他机型或内核版本：不支持，请勿尝试。</b><br>
-本工具用的内核地址、结构体偏移全部是在上面这一版内核上实测出来的。换一个内核这些值就失效，写下去等于直接改坏内核内存，结果是当场 panic 或随机重启。判断标准看 <b>uname -r</b> 和 ABO build id，不是看系统版本号。<br><br>
+本工具用的内核地址、结构体偏移、slab 参数全部是在这一版内核上实测出来的。换一个内核这些值就失效，写下去等于直接改坏内核内存，结果可能是当场 panic。<br><br>
 
 <b>项目限制</b><br>
 · 临时 root：重启即失效，不写 boot 分区，不做持久化<br>
-· 前提：Shizuku（或 Shevery 等兼容实现）已在运行 + KernelSU 或 SukiSU Ultra 管理器已安装<br>
-· 约 40% 概率触发内核 panic 并重启（实测 17 次里 7 次）<br>· 系统负载高时失败率更高。状态行会显示当前负载，<b>「偏高」时建议先等一等</b><br>
-· 成功后内核里会留一颗 dangling timer，之后可能随机崩溃，重启清除<br>
+· 前提：Shizuku（或 Shevery 等兼容实现）已运行 + SukiSU Ultra 或 KernelSU 管理器已安装<br>
+· 失败仍可能触发内核 panic 并重启；失败后必须先重启再重试（见下）<br>
+· 成功后内核里可能仍残留悬空定时器节点，长时间高负载或锁屏深度休眠后有小概率崩溃；重启清除<br>
 · 不提供 Magisk 模块、Zygisk、隐藏、开机自启<br>
 · 仅在 prague 这一款设备上验证过<br><br>
 
+<b>失败之后必须先重启</b><br>
+exploit 中途失败时虽然会打印 <code>KERNEL_STATE_RESTORE_PASS dirty=0</code>，但那只是把 <code>misc_list</code> 头指针指回去，中间那个伪造的 <code>miscdevice</code> 节点并没有从链表里摘下来，而它指向的内存已经释放。这时直接再点一次「开启」，下一次 <code>misc_open</code> 遍历链表就会踩到已释放内存直接 panic。<br>
+v1.0.3 起 App 会检测「上次失败且没重启过」并拒绝执行，提示你重启。<br><br>
+
 <b>支持的管理器</b><br>
-KernelSU 与 SukiSU Ultra <b>都可用</b>：ksud 在运行期从已装管理器里提取，优先 SukiSU，取不到再退回 KernelSU。两者是同源分支，late-load / feature 的 CLI 完全一致，所以脚本通用。注意 <b>ksud 与内核模块必须来自同一个管理器</b>——late-load 加载的就是 ksud 自带的那一份 ko，混用会 uapi 不匹配。<br>
-两个都装时，可以在主界面点「管理器」那行手动指定用哪一个。切换后 <b>必须先重启再开 root</b>：两家的模块名都叫 kernelsu，老模块还在内核里时新模块会加载失败。<br><br>
+KernelSU 与 SukiSU Ultra <b>都可用</b>：ksud 在运行期从已装管理器里提取，优先 SukiSU，取不到再退回 KernelSU。两者是同源分支，late-load / feature 的 CLI 完全一致。注意 <b>ksud 与内核模块必须来自同一个管理器</b>——late-load 加载的就是 ksud 自带的那一份 ko，混用会 uapi 不匹配。<br>
+两个都装时，可以在主界面点「管理器」那行手动指定。切换后 <b>必须先重启再开 root</b>：两家的模块名都叫 kernelsu，老模块还在内核里时新模块会加载失败。<br><br>
 
 <b>支持的 Shizuku 实现</b><br>
 官方 Shizuku 与 Shevery <b>已实测可用</b>。Shizuku-Next、yangFenTuoZi/Shizuku、ShizukuPlus 的 dropin 版与其同包名同权限名，理论可用。Nightzuku 和 ShizukuPlus 独立版把权限名改成了自己的前缀，官方 API 库请求不到，暂不兼容。<br><br>
@@ -712,11 +746,12 @@ KernelSU 与 SukiSU Ultra <b>都可用</b>：ksud 在运行期从已装管理器
 <b>请勿用于非自有设备。作者不对任何直接或间接损失负责。</b><br><br>
 
 <b>致谢</b><br>
-利用代码 <a href="https://github.com/ChaYeWuu/prague-CVE-2026-64560-OS4.0">ChaYeWuu/prague-CVE-2026-64560-OS4.0</a>（Apache-2.0）<br>
+利用代码 <a href="https://github.com/ChaYeWuu/prague-CVE-2026-98260-OS4.0">ChaYeWuu/prague-CVE-2026-98260-OS4.0</a>（Apache-2.0）<br>
+上一代利用代码 <a href="https://github.com/ChaYeWuu/prague-CVE-2026-64560-OS4.0">ChaYeWuu/prague-CVE-2026-64560-OS4.0</a>（Apache-2.0）<br>
 KernelSU <a href="https://github.com/tiann/KernelSU">tiann/KernelSU</a>（GPL-3.0，运行期从已装管理器提取）<br>
 SukiSU Ultra <a href="https://github.com/SukiSU-Ultra/SukiSU-Ultra">SukiSU-Ultra/SukiSU-Ultra</a>（GPL-3.0，运行期从已装管理器提取）<br>
 Shizuku <a href="https://github.com/RikkaApps/Shizuku">RikkaApps/Shizuku</a>（Apache-2.0）<br>
-漏洞 <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-64560">CVE-2026-64560</a>（posix-cpu-timers UAF）
+漏洞 <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-98260">CVE-2026-98260</a>（exec / POSIX CPU timer UAF）
         """
     }
 }
