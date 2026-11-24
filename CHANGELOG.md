@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.10] - 2026-11-18
+
+### 修成功弹窗误报「没找到已安装的 KernelSU / SukiSU 管理器」
+
+- 现象：`su` 明明已经可用，成功弹窗底部却还是写着「没找到已安装的 KernelSU / SukiSU 管理器。」
+- 根因：`targetSdk = 34` 时 Android 11+ 的**包可见性**生效。App 没有在 `AndroidManifest.xml` 里声明 `<queries>`，于是 `packageManager.getPackageInfo("com.sukisu.ultra", 0)` 会抛 `NameNotFoundException` —— 即使该包确实装着。同一个包用 `pm path`（走 Shizuku/shell 权限）就能查到，所以 `[2/5]` 里 ksud 提取一切正常，只有弹窗这一处判断失败。
+- 修复：`AndroidManifest.xml` 加
+  ```xml
+  <queries>
+      <package android:name="com.sukisu.ultra" />
+      <package android:name="me.weishu.kernelsu" />
+  </queries>
+  ```
+- 影响面：只有成功弹窗的「打开管理器」按钮与那段提示；root 流程本身不受影响。
+
 ## [1.2.9] - 2026-11-18
 
 ### 状态卡片不再显示 loadavg

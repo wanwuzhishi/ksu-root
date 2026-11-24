@@ -32,3 +32,6 @@ Thumbs.db
 # 注意：app/src/main/assets/ptyrun 是编译产物，但**故意提交**，
 # 这样 clone 下来不用装 NDK 也能直接 assembleDebug。
 # 源码在 app/src/main/cpp/ptyrun.c，改动后按 README「构建」一节重编。
+
+# 调试日志（本地排查用，不入库）
+/logs/

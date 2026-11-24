@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- targetSdk 34 起 Android 11+ 的包可见性生效：不在这里声明，
+         packageManager.getPackageInfo("com.sukisu.ultra") 会抛 NameNotFoundException，
+         即使该管理器确实装着，于是成功弹窗会误报「没找到已安装的管理器」。
+         加 queries 之后 App 侧才能看见这两个包。 -->
+    <queries>
+        <package android:name="com.sukisu.ultra" />
+        <package android:name="me.weishu.kernelsu" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
